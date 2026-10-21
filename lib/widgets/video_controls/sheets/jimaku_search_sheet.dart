@@ -9,6 +9,7 @@ import '../../../media/ids.dart';
 import '../../../media/media_item.dart';
 import '../../../mixins/controller_disposer_mixin.dart';
 import '../../../services/jimaku/jimaku_client.dart';
+import '../../../services/jimaku/jimaku_memory.dart';
 import '../../../services/jimaku/jimaku_service.dart';
 import '../../../utils/provider_extensions.dart';
 import '../../../utils/snackbar_helper.dart';
@@ -53,6 +54,7 @@ class _JimakuSearchSheetState extends State<JimakuSearchSheet> with ControllerDi
   List<JimakuFile> _files = const [];
   bool _showAllFiles = false;
   List<File> _archiveSubtitles = const [];
+  JimakuFile? _pickedSource;
   String? _busyName;
 
   @override
@@ -151,6 +153,7 @@ class _JimakuSearchSheetState extends State<JimakuSearchSheet> with ControllerDi
   Future<void> _pickFile(JimakuFile file) async {
     if (_busyName != null) return;
     setState(() => _busyName = file.name);
+    _pickedSource = file;
     try {
       final subtitles = await JimakuService.fetchSubtitleFiles(_jimaku, file, episode: _episode);
       if (!mounted) return;
@@ -174,7 +177,10 @@ class _JimakuSearchSheetState extends State<JimakuSearchSheet> with ControllerDi
   Future<void> _apply(File subtitle) async {
     final name = subtitle.uri.pathSegments.last;
     try {
-      await widget.onAddSubtitle(subtitle.path, 'Jimaku: $name');
+      // Kept so the next playback of this item loads it again (JimakuMemory.restore).
+      final source = _pickedSource;
+      final path = source == null ? subtitle.path : await JimakuMemory.remember(widget.item, source, subtitle);
+      await widget.onAddSubtitle(path, JimakuMemory.trackTitle(name));
       if (!mounted) return;
       showSuccessSnackBar(context, JimakuStrings.loaded(name));
       OverlaySheetController.of(context).close();

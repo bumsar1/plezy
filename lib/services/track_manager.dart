@@ -11,6 +11,7 @@ import '../services/scoped_player_prefs.dart';
 import '../services/settings_service.dart';
 import '../services/subtitle_preference.dart';
 import '../services/track_selection_service.dart';
+import 'jimaku/jimaku_memory.dart';
 import '../utils/app_logger.dart';
 import '../utils/track_label_builder.dart';
 
@@ -335,7 +336,7 @@ class TrackManager {
         plexMediaInfo: mediaInfo,
       );
 
-      return await trackService.selectAndApplyTracks(
+      final applied = await trackService.selectAndApplyTracks(
         preferredAudioTrack: preferredAudioTrack,
         preferredSubtitleTrack: preferredSubtitleTrack,
         preferredSecondarySubtitleTrack: preferredSecondarySubtitleTrack,
@@ -349,6 +350,9 @@ class TrackManager {
         waitForPendingSource: waitForPendingSource,
         primarySubtitleIsServerRendered: primarySubtitleIsServerRendered,
       );
+      // Fork: re-load the Jimaku subtitle remembered for this item on top of Plezy's own pick.
+      if (selectionIsActive()) await JimakuMemory.restore(player, metadata, isActive: selectionIsActive);
+      return applied;
     } catch (e) {
       appLogger.w('Failed to apply track selection', error: e);
       return false;
@@ -468,6 +472,7 @@ class TrackManager {
   /// selection for the same reason as [onAudioTrackSelectedByUser].
   Future<void> onSubtitleTrackSelectedByUser(SubtitleTrack track, {int? sourceStreamId}) async {
     await invalidatePendingSelection();
+    unawaited(JimakuMemory.onUserPickedSubtitle(metadata, track)); // Fork
     await onSubtitleTrackChanged(track, sourceStreamId: sourceStreamId);
   }
 
