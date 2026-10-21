@@ -241,7 +241,11 @@ class _JimakuSearchSheetState extends State<JimakuSearchSheet> with ControllerDi
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(16),
-          child: Text(_error!, textAlign: TextAlign.center, style: TextStyle(color: colorScheme.error)),
+          child: Text(
+            _error!,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: colorScheme.error),
+          ),
         ),
       );
     }
