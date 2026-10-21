@@ -13,6 +13,8 @@ import '../../../widgets/overlay_sheet.dart';
 import 'base_video_control_sheet.dart';
 import 'sheet_selection_column.dart';
 import 'sheet_split_columns.dart';
+import 'jimaku_search_sheet.dart';
+import 'jimaku_strings.dart';
 import 'subtitle_search_sheet.dart';
 import '../models/track_controls_state.dart';
 import '../helpers/track_filter_helper.dart';
@@ -491,7 +493,7 @@ class _SubtitleColumn extends StatelessWidget {
 }
 
 List<Widget> _buildSubtitleSearchFooter(BuildContext context, TrackControlsState state) {
-  if (!state.canSearchSubtitles) return const [];
+  if (!state.canSearchSubtitles) return _buildJimakuFooter(context, state, withDivider: true);
 
   return [
     Divider(height: 1, color: Theme.of(context).dividerColor),
@@ -506,6 +508,25 @@ List<Widget> _buildSubtitleSearchFooter(BuildContext context, TrackControlsState
             mediaTitle: state.mediaTitle,
             onSubtitleDownloaded: state.onSubtitleDownloaded,
           ),
+        );
+      },
+    ),
+    ..._buildJimakuFooter(context, state, withDivider: false),
+  ];
+}
+
+/// Fork: "Search Jimaku" tile, below Plex's own subtitle search when present.
+List<Widget> _buildJimakuFooter(BuildContext context, TrackControlsState state, {required bool withDivider}) {
+  if (!state.canSearchJimaku) return const [];
+
+  return [
+    if (withDivider) Divider(height: 1, color: Theme.of(context).dividerColor),
+    FocusableListTile(
+      leading: const AppIcon(Symbols.translate_rounded),
+      title: const Text(JimakuStrings.menuTile),
+      onTap: () {
+        OverlaySheetController.of(context).push(
+          builder: (_) => JimakuSearchSheet(item: state.metadata!, onAddSubtitle: state.onAddExternalSubtitle!),
         );
       },
     ),

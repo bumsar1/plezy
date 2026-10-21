@@ -7,8 +7,10 @@ import '../../../models/transcode_quality_preset.dart';
 import '../../../mpv/mpv.dart';
 import '../../../services/playback_initialization_types.dart';
 import '../../../services/playback_subtitle_resolver.dart';
+import '../../../services/jimaku/jimaku_service.dart';
 import '../../../services/shader_service.dart';
 import '../helpers/track_filter_helper.dart';
+import '../sheets/jimaku_search_sheet.dart';
 
 enum SubtitleDownloadApplyOutcome { applied, timedOut, busy, superseded, unavailable, failed }
 
@@ -84,6 +86,10 @@ class TrackControlsState {
   /// this is false.
   final bool subtitleSearchSupported;
 
+  /// Fork: loads a local subtitle file into the player (mpv `sub-add`). Null
+  /// on engines that cannot add tracks mid-playback, which hides Jimaku.
+  final JimakuAddSubtitle? onAddExternalSubtitle;
+
   const TrackControlsState({
     this.availableVersions = const [],
     this.selectedMediaIndex = 0,
@@ -138,6 +144,7 @@ class TrackControlsState {
     this.mediaTitle,
     this.onSubtitleDownloaded,
     this.subtitleSearchSupported = true,
+    this.onAddExternalSubtitle,
   });
 
   /// Transcoded subtitle choices must be negotiated with the server and
@@ -179,6 +186,10 @@ class TrackControlsState {
   bool get canSearchSubtitles =>
       ratingKey.isNotEmpty && serverId != null && serverId!.isNotEmpty && subtitleSearchSupported;
 
+  /// Fork: Jimaku search needs the playing item, an engine that can add a
+  /// subtitle file, and a configured API key.
+  bool get canSearchJimaku => metadata != null && onAddExternalSubtitle != null && JimakuService.isConfigured;
+
   /// Whether the track sheet should expose subtitle controls at all. This is
   /// the single source of truth shared by the toolbar icon and the sheet layout.
   bool hasSubtitleControls(Tracks? tracks) {
@@ -186,6 +197,7 @@ class TrackControlsState {
     return canUseSourceSubtitles ||
         directPlaySourceSidecars.isNotEmpty ||
         TrackFilterHelper.hasTracks<SubtitleTrack>(playerSubtitles) ||
-        canSearchSubtitles;
+        canSearchSubtitles ||
+        canSearchJimaku;
   }
 }

@@ -217,8 +217,13 @@ extension _PlexVideoControlsTrackMethods on _PlexVideoControlsState {
       // for Jellyfin items. The check uses the registered client type for
       // this metadata's serverId.
       subtitleSearchSupported: _isPlexBackedMetadata(),
+      onAddExternalSubtitle: widget.player.playerType == 'mpv' ? _addExternalSubtitleFile : null,
     );
   }
+
+  /// Fork (Jimaku): adds a local subtitle file as a new mpv track and selects it.
+  Future<void> _addExternalSubtitleFile(String path, String title) =>
+      widget.player.command(['sub-add', path, 'select', title, 'ja']);
 
   /// True when the active server supports external subtitle search (Plex
   /// today). Requires a server id because the download callback needs the
