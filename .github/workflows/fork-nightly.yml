@@ -186,15 +186,29 @@ jobs:
           mkdir -p dmg-staging
           cp -R build/macos/Build/Products/Release/Plezy.app dmg-staging/
           ln -s /Applications dmg-staging/Applications
-          hdiutil create -format ULMO -srcfolder dmg-staging -volname "Plezy" plezy-macos.dmg
+          # hdiutil's own size estimate sometimes runs out of room on hosted
+          # runners ("No space left on device"), so size the image explicitly.
+          size_mb=$(( $(du -sm dmg-staging | cut -f1) * 13 / 10 + 50 ))
+          for attempt in 1 2 3; do
+            hdiutil create -format ULMO -size "${size_mb}m" -srcfolder dmg-staging -volname "Plezy" plezy-macos.dmg && break
+            rm -f plezy-macos.dmg
+            [ "$attempt" = 3 ] && exit 1
+            sleep 10
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: macos
           path: plezy-macos.dmg
 
+  # Publishes whichever platforms built, so one platform's failure does not
+  # hold back the other. A partial build gets a different stamp, so the next
+  # scheduled run rebuilds instead of skipping.
   release:
     needs: [prepare, build-windows, build-macos]
+    if: >-
+      !cancelled() && needs.prepare.outputs.skip != 'true' &&
+      (needs.build-windows.result == 'success' || needs.build-macos.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -211,9 +225,15 @@ jobs:
           FORK_SHA: ${{ needs.prepare.outputs.fork_sha }}
           UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          WINDOWS_RESULT: ${{ needs.build-windows.result }}
+          MACOS_RESULT: ${{ needs.build-macos.result }}
         run: |
-          notes=$(printf 'Plezy %s with this fork'"'"'s changes, built %s.\n\nupstream=%s fork=%s\n\nmacOS build is ad-hoc signed: after copying it to Applications run `xattr -dr com.apple.quarantine /Applications/Plezy.app` once.' \
-            "$VERSION" "$(date -u +'%Y-%m-%d %H:%M UTC')" "$UPSTREAM_SHA" "$FORK_SHA")
+          stamp="upstream=$UPSTREAM_SHA fork=$FORK_SHA"
+          if [[ "$WINDOWS_RESULT" != success || "$MACOS_RESULT" != success ]]; then
+            stamp="PARTIAL (windows: $WINDOWS_RESULT, macos: $MACOS_RESULT; the failed platform's file is from an older build) upstream $UPSTREAM_SHA, fork $FORK_SHA"
+          fi
+          notes=$(printf 'Plezy %s with this fork'"'"'s changes, built %s.\n\n%s\n\nmacOS build is ad-hoc signed: after copying it to Applications run `xattr -dr com.apple.quarantine /Applications/Plezy.app` once.' \
+            "$VERSION" "$(date -u +'%Y-%m-%d %H:%M UTC')" "$stamp")
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "Nightly $VERSION" --notes "$notes" --prerelease
           else
