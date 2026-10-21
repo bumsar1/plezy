@@ -7,7 +7,6 @@ import 'package:path_provider/path_provider.dart';
 import '../../media/media_item.dart';
 import '../../media/media_kind.dart';
 import '../../media/media_server_client.dart';
-import '../base_shared_preferences_service.dart';
 import '../settings_service.dart';
 import '../trackers/tracker_id_resolver.dart';
 import 'jimaku_client.dart';

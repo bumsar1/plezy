@@ -87,7 +87,7 @@ class JimakuClient {
   Future<List<JimakuEntry>> searchEntries({int? anilistId, String? tmdbId, String? query, bool? anime}) async {
     final params = <String, String>{
       if (anilistId != null) 'anilist_id': '$anilistId',
-      if (tmdbId != null) 'tmdb_id': tmdbId,
+      'tmdb_id': ?tmdbId,
       if (query != null && query.isNotEmpty) 'query': query,
       if (anime != null) 'anime': '$anime',
     };

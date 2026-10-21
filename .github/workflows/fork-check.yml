@@ -40,10 +40,21 @@ jobs:
       - name: Install dependencies
         run: flutter pub get --enforce-lockfile --no-example
 
-      # Whole-app analysis, so a fork edit that breaks an upstream file fails here
-      # rather than in the nightly build.
+      - name: Install wakelock_plus development dependencies
+        working-directory: packages/wakelock_plus
+        run: flutter pub get --enforce-lockfile --no-example
+
+      # The same checks upstream CI runs on lib/, so fork code stays mergeable.
+      - name: Verify formatting
+        run: |
+          find lib test -name "*.dart" ! -name "*.g.dart" ! -name "*.freezed.dart" -type f -print0 |
+            xargs -0 -r dart format --output=none --set-exit-if-changed
+
+      - name: Verify icon consistency
+        run: dart run scripts/checks/check_icon_consistency.dart
+
       - name: Analyze
-        run: flutter analyze --no-fatal-infos
+        run: dart run scripts/checks/check_analyzer.dart
 
       - name: Test fork code
         run: flutter test test/services/jimaku
