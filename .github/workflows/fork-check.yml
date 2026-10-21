@@ -48,7 +48,8 @@ jobs:
       - name: Verify formatting
         run: |
           find lib test -name "*.dart" ! -name "*.g.dart" ! -name "*.freezed.dart" -type f -print0 |
-            xargs -0 -r dart format --output=none --set-exit-if-changed
+            xargs -0 -r dart format
+          git diff --exit-code -- lib test
 
       - name: Verify icon consistency
         run: dart run scripts/checks/check_icon_consistency.dart
