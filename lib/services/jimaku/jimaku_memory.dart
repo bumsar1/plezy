@@ -164,7 +164,7 @@ class JimakuMemory {
       if (files.isEmpty) return null;
       final wanted = entry['name'] as String;
       final picked = files.firstWhere((f) => f.uri.pathSegments.last == wanted, orElse: () => files.first);
-      return remember(item, source, picked);
+      return await remember(item, source, picked);
     } finally {
       jimaku.close();
     }
