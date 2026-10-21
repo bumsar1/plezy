@@ -142,7 +142,13 @@ class JimakuMemory {
         path = redownloaded;
       }
       if (!isActive()) return;
+      final added = player.streams.tracks
+          .firstWhere((tracks) => tracks.subtitle.any((t) => t.title == title))
+          .timeout(const Duration(seconds: 3));
       await player.command(['sub-add', path, 'select', title, 'ja']);
+      // Hold the guard until the track list shows the new track, so a selection
+      // pass right behind this one finds it instead of adding it a second time.
+      await added.then((_) {}, onError: (Object _) {});
       appLogger.i('Jimaku: restored remembered subtitle $name');
     } catch (e) {
       appLogger.w('Jimaku: could not restore remembered subtitle', error: e);
