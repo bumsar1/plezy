@@ -347,7 +347,10 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
               ),
               // Fork: hoverable subtitles with a dictionary popup. Above the
               // controls so hover reaches it; claims hits only on the text.
-              if (player != null) Positioned.fill(child: StudySubtitleOverlay(player: player!)),
+              if (player != null)
+                Positioned.fill(
+                  child: StudySubtitleOverlay(player: player!, controlsVisible: _chromeController),
+                ),
               // Netflix-style auto-play overlay (hidden in PiP mode)
               VideoPlayerPlayNextOverlay(
                 visible: _episode.showPlayNextDialog,

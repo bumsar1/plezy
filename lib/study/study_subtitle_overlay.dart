@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
@@ -21,7 +22,11 @@ import 'study_strings.dart';
 class StudySubtitleOverlay extends StatefulWidget {
   final Player player;
 
-  const StudySubtitleOverlay({super.key, required this.player});
+  /// Whether the player controls are showing; the subtitle moves up so the
+  /// bottom bar doesn't cover it.
+  final ValueListenable<bool>? controlsVisible;
+
+  const StudySubtitleOverlay({super.key, required this.player, this.controlsVisible});
 
   @override
   State<StudySubtitleOverlay> createState() => _StudySubtitleOverlayState();
@@ -30,6 +35,9 @@ class StudySubtitleOverlay extends StatefulWidget {
 class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
   static const _pollInterval = Duration(milliseconds: 100);
   static const _popupWidth = 380.0;
+
+  /// Clearance above the desktop controls' seek bar and button row.
+  static const _controlsClearance = 130.0;
 
   final _overlayKey = GlobalKey();
   final List<GlobalKey> _lineKeys = [];
@@ -51,6 +59,11 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
   int _lookupToken = 0;
   bool _pausedByUs = false;
 
+  // While the pointer is on the subtitle it stays put, so showing or hiding
+  // the controls never slides the text out from under the cursor.
+  bool _pointerInside = false;
+  double? _frozenBottom;
+
   @override
   void initState() {
     super.initState();
@@ -59,6 +72,7 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
     _enabled = SettingsService.instance.listenable(StudyMode.enabled);
     _enabled.addListener(_onEnabledChanged);
     StudyMode.subtitlesVisible.addListener(_applyMpvVisibility);
+    widget.controlsVisible?.addListener(_onControlsChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _onEnabledChanged();
     });
@@ -67,6 +81,10 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
   @override
   void didUpdateWidget(covariant StudySubtitleOverlay oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.controlsVisible != widget.controlsVisible) {
+      oldWidget.controlsVisible?.removeListener(_onControlsChanged);
+      widget.controlsVisible?.addListener(_onControlsChanged);
+    }
     if (oldWidget.player != widget.player) {
       _clearHover(resume: false);
       _onEnabledChanged();
@@ -77,8 +95,13 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
   void dispose() {
     _enabled.removeListener(_onEnabledChanged);
     StudyMode.subtitlesVisible.removeListener(_applyMpvVisibility);
+    widget.controlsVisible?.removeListener(_onControlsChanged);
     _poll?.cancel();
     super.dispose();
+  }
+
+  void _onControlsChanged() {
+    if (mounted && !_pointerInside) setState(() {});
   }
 
   bool get _active => _enabled.value && StudyMode.supports(widget.player);
@@ -215,12 +238,17 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
         final border = settings.read(SettingsService.subtitleBorderSize) * scale;
         // mpv's sub-pos: 100 is the bottom edge, with its default 22px margin.
         final position = settings.read(SettingsService.subtitlePosition);
-        final bottom = (22 * scale) + (100 - position) / 100 * constraints.maxHeight;
+        var bottom = (22 * scale) + (100 - position) / 100 * constraints.maxHeight;
+        if (widget.controlsVisible?.value ?? false) bottom = math.max(bottom, _controlsClearance);
+        if (_pointerInside) bottom = _frozenBottom ?? bottom;
+        _frozenBottom = bottom;
 
         return Stack(
           children: [
             if (StudyMode.subtitlesVisible.value && _text.isNotEmpty)
-              Positioned(
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOut,
                 left: 24,
                 right: 24,
                 bottom: bottom,
@@ -249,7 +277,13 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
     );
 
     return MouseRegion(
-      onExit: (_) => _clearHover(resume: true),
+      onEnter: (_) => _pointerInside = true,
+      onExit: (_) {
+        _pointerInside = false;
+        _clearHover(resume: true);
+        // Catch up with any controls change that happened while frozen.
+        if (mounted) setState(() {});
+      },
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -260,15 +294,19 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
               child: Stack(
                 children: [
                   // Outline underneath, laid out identically to the hit-tested text.
-                  Text(
-                    lines[i],
+                  // RichText for both: Text would merge the app's DefaultTextStyle
+                  // and lay out differently from the text on top.
+                  RichText(
                     textAlign: TextAlign.center,
-                    style: base.copyWith(
-                      foreground: Paint()
-                        ..style = PaintingStyle.stroke
-                        ..strokeWidth = border * 2
-                        ..strokeJoin = StrokeJoin.round
-                        ..color = Colors.black,
+                    text: TextSpan(
+                      text: lines[i],
+                      style: base.copyWith(
+                        foreground: Paint()
+                          ..style = PaintingStyle.stroke
+                          ..strokeWidth = border * 2
+                          ..strokeJoin = StrokeJoin.round
+                          ..color = Colors.black,
+                      ),
                     ),
                   ),
                   RichText(key: _lineKeys[i], textAlign: TextAlign.center, text: _highlighted(lines[i], i, base)),

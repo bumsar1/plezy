@@ -35,6 +35,7 @@ class _HarnessApp extends StatefulWidget {
 
 class _HarnessAppState extends State<_HarnessApp> {
   final _boundary = GlobalKey();
+  final _controls = ValueNotifier<bool>(Platform.environment['PLEZY_HARNESS_CONTROLS'] == '1');
   Player? _player;
 
   @override
@@ -109,18 +110,24 @@ class _HarnessAppState extends State<_HarnessApp> {
     final player = _player;
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: RepaintBoundary(
-        key: _boundary,
-        child: ColoredBox(
-          color: const Color(0xFF203050),
-          child: player == null
-              ? const SizedBox.expand()
-              : Stack(
-                  children: [
-                    Video(player: player),
-                    Positioned.fill(child: StudySubtitleOverlay(player: player)),
-                  ],
-                ),
+      // Like the app: a themed DefaultTextStyle the overlay must not pick up.
+      theme: ThemeData(textTheme: const TextTheme(bodyMedium: TextStyle(letterSpacing: 2))),
+      home: Material(
+        child: RepaintBoundary(
+          key: _boundary,
+          child: ColoredBox(
+            color: const Color(0xFF203050),
+            child: player == null
+                ? const SizedBox.expand()
+                : Stack(
+                    children: [
+                      Video(player: player),
+                      Positioned.fill(
+                        child: StudySubtitleOverlay(player: player, controlsVisible: _controls),
+                      ),
+                    ],
+                  ),
+          ),
         ),
       ),
     );
