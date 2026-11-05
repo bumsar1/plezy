@@ -23,6 +23,8 @@ import '../../../providers/shader_provider.dart';
 import '../../../services/file_picker_service.dart';
 import '../../../services/scoped_player_prefs.dart';
 import '../../../services/settings_service.dart';
+import '../../../study/study_mode.dart';
+import '../../../study/study_strings.dart';
 import '../../../services/sleep_timer_service.dart';
 import '../../../services/video_filter_manager.dart';
 import '../../../focus/focusable_wrapper.dart';
@@ -906,6 +908,15 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
           icon: Symbols.skip_next_rounded,
           title: t.videoControls.autoPlayNext,
         ),
+
+        // Fork: hover-to-look-up Japanese subtitles.
+        if (StudyMode.supports(widget.player))
+          _SettingsToggleItem(
+            pref: StudyMode.enabled,
+            icon: Symbols.translate_rounded,
+            title: StudyStrings.toggle,
+            subtitle: StudyStrings.toggleSubtitle,
+          ),
 
         if (isDesktop)
           StreamBuilder<AudioDevice>(

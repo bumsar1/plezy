@@ -58,7 +58,9 @@ extension _PlexVideoControlsTrackMethods on _PlexVideoControlsState {
     unawaited(() async {
       try {
         final committed = await coordinator.commitIfLatest('sub-visibility', writeToken, () async {
-          await targetPlayer.setProperty('sub-visibility', visible ? 'yes' : 'no');
+          // Fork: study mode draws subtitles itself, so mpv stays hidden.
+          StudyMode.subtitlesVisible.value = visible;
+          await targetPlayer.setProperty('sub-visibility', StudyMode.mpvSubVisibility(targetPlayer, visible));
           if (mounted && targetPlayer == widget.player) {
             // Preserve every successfully executed mutation as the rollback
             // baseline, even when a newer optimistic toggle is queued.

@@ -73,6 +73,7 @@ import '../services/player_sync_offsets.dart';
 import '../services/preferred_audio_device.dart';
 import '../services/scoped_player_prefs.dart';
 import '../services/settings_service.dart';
+import '../study/study_subtitle_overlay.dart';
 import '../services/sleep_timer_service.dart';
 import '../services/subtitle_preference.dart';
 import '../services/track_manager.dart';
