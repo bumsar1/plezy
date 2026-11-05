@@ -31,4 +31,8 @@ class StudyStrings {
   static const removeTitle = 'Remove dictionary?';
   static String removeMessage(String title) => '"$title" will no longer appear in study mode.';
   static const remove = 'Remove';
+
+  static const syncTitle = 'Sync subtitles to English';
+  static const syncSubtitle = 'Line the selected subtitles up with the video\'s English track';
+  static const syncing = 'Syncing…';
 }

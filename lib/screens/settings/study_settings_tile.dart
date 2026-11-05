@@ -6,6 +6,7 @@ import '../../services/file_picker_service.dart';
 import '../../services/settings_service.dart';
 import '../../study/study_anki.dart';
 import '../../study/study_dictionary.dart';
+import '../../study/study_ffmpeg.dart';
 import '../../study/study_strings.dart';
 import '../../study/study_user_dictionaries.dart';
 import '../../utils/dialogs.dart';
@@ -55,7 +56,7 @@ class StudySettingsGroup extends StatelessWidget {
         ),
         const _StudyDictionaryTiles(),
         FutureBuilder<String?>(
-          future: StudyAnki.findFfmpeg(),
+          future: StudyFfmpeg.find(),
           builder: (context, snapshot) => SettingNavigationTile(
             icon: Symbols.movie_rounded,
             title: StudyStrings.ffmpegTitle,

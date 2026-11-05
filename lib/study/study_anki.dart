@@ -12,6 +12,7 @@ import '../mpv/mpv.dart';
 import '../services/settings_service.dart';
 import '../utils/app_logger.dart';
 import 'study_dictionary.dart';
+import 'study_ffmpeg.dart';
 
 enum StudyAnkiOutcome { added, duplicate, failed }
 
@@ -261,7 +262,7 @@ class StudyAnki {
   // Media from the playing video.
 
   static Future<({List<int>? audio, List<int>? gif})> _cutClip(Player player, int stamp, List<String> notes) async {
-    final ffmpeg = await findFfmpeg();
+    final ffmpeg = await StudyFfmpeg.find();
     if (ffmpeg == null) {
       notes.add('No ffmpeg found, so no sentence audio or GIF');
       return (audio: null, gif: null);
@@ -278,7 +279,7 @@ class StudyAnki {
     if (from < 0) from = 0;
     if (to - from > _maxClip.inSeconds) to = from + _maxClip.inSeconds;
 
-    final headers = _headerArgs(await player.getProperty('http-header-fields'));
+    final headers = StudyFfmpeg.headerArgs(await player.getProperty('http-header-fields'));
     // Duration on the input side: as an output option ffmpeg keeps reading
     // until the input ends, and palettegen waits for that end, so a GIF from
     // a Plex stream would download the rest of the episode first.
@@ -299,7 +300,7 @@ class StudyAnki {
     final gifLength = (to - from).clamp(0.5, _maxGif.inSeconds.toDouble());
 
     final results = await Future.wait([
-      _runFfmpeg(ffmpeg, [
+      StudyFfmpeg.run(ffmpeg, [
         ...input(to - from),
         '-map',
         audioIndex == null || audioIndex.isEmpty ? '0:a:0' : '0:$audioIndex',
@@ -312,7 +313,7 @@ class StudyAnki {
         '4',
         audioFile.path,
       ]),
-      _runFfmpeg(ffmpeg, [
+      StudyFfmpeg.run(ffmpeg, [
         ...input(gifLength),
         '-map',
         '0:v:0',
@@ -340,57 +341,6 @@ class StudyAnki {
   }
 
   static double? _seconds(String? value) => value == null ? null : double.tryParse(value);
-
-  /// mpv lists headers comma-joined (`A: x,B: y`); ffmpeg wants CRLF lines.
-  static List<String> _headerArgs(String? fields) {
-    if (fields == null || fields.trim().isEmpty) return const [];
-    final headers = fields.split(RegExp(r',(?=[A-Za-z0-9-]+:)')).where((h) => h.contains(':'));
-    if (headers.isEmpty) return const [];
-    return ['-headers', '${headers.map((h) => h.trim()).join('\r\n')}\r\n'];
-  }
-
-  static Future<bool> _runFfmpeg(String ffmpeg, List<String> args) async {
-    try {
-      final process = await Process.start(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', ...args]);
-      final stderr = process.stderr.transform(utf8.decoder).join();
-      unawaited(process.stdout.drain<void>());
-      // A Future timeout alone would leave ffmpeg running; kill it.
-      final exitCode = await process.exitCode.timeout(
-        const Duration(seconds: 60),
-        onTimeout: () {
-          process.kill();
-          return -1;
-        },
-      );
-      if (exitCode != 0) appLogger.w('Study mode: ffmpeg failed ($exitCode): ${await stderr}');
-      return exitCode == 0;
-    } catch (e) {
-      appLogger.w('Study mode: ffmpeg did not run', error: e);
-      return false;
-    }
-  }
-
-  static String? _ffmpegPath;
-
-  /// ffmpeg from PATH, or where Homebrew/winget put it (apps started from
-  /// Finder don't inherit the shell's PATH).
-  static Future<String?> findFfmpeg() async {
-    if (_ffmpegPath != null) return _ffmpegPath;
-    final exe = Platform.isWindows ? 'ffmpeg.exe' : 'ffmpeg';
-    final env = Platform.environment;
-    final candidates = <String>[
-      for (final dir in (env['PATH'] ?? '').split(Platform.isWindows ? ';' : ':'))
-        if (dir.isNotEmpty) '$dir${Platform.pathSeparator}$exe',
-      if (Platform.isMacOS) ...['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg'],
-      if (Platform.isWindows && env['LOCALAPPDATA'] != null)
-        '${env['LOCALAPPDATA']}\\Microsoft\\WinGet\\Links\\ffmpeg.exe',
-      if (Platform.isWindows) 'C:\\ffmpeg\\bin\\ffmpeg.exe',
-    ];
-    for (final c in candidates) {
-      if (await File(c).exists()) return _ffmpegPath = c;
-    }
-    return null;
-  }
 }
 
 class StudyAnkiException implements Exception {

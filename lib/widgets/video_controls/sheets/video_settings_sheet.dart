@@ -25,6 +25,7 @@ import '../../../services/scoped_player_prefs.dart';
 import '../../../services/settings_service.dart';
 import '../../../study/study_mode.dart';
 import '../../../study/study_strings.dart';
+import '../../../study/study_sync_menu_item.dart';
 import '../../../services/sleep_timer_service.dart';
 import '../../../services/video_filter_manager.dart';
 import '../../../focus/focusable_wrapper.dart';
@@ -917,6 +918,7 @@ class _VideoSettingsSheetState extends State<VideoSettingsSheet> {
             title: StudyStrings.toggle,
             subtitle: StudyStrings.toggleSubtitle,
           ),
+        if (StudyMode.supports(widget.player)) StudySyncMenuItem(player: widget.player, metadata: _state.metadata),
 
         if (isDesktop)
           StreamBuilder<AudioDevice>(

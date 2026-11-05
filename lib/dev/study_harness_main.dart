@@ -19,6 +19,7 @@ import '../mpv/video.dart';
 import '../services/settings_service.dart';
 import '../study/study_mode.dart';
 import '../study/study_subtitle_overlay.dart';
+import '../study/study_subtitle_sync.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -53,6 +54,20 @@ class _HarnessAppState extends State<_HarnessApp> {
     await player.open(Media('file://${env['PLEZY_HARNESS_MEDIA']}'));
     await player.command(['sub-add', env['PLEZY_HARNESS_SUB']!, 'select']);
     await Future<void>.delayed(const Duration(seconds: 3));
+
+    // PLEZY_HARNESS_SYNC=1: line the loaded subtitle up with the file's English track.
+    if (env['PLEZY_HARNESS_SYNC'] == '1') {
+      final seek = env['PLEZY_HARNESS_SEEK'];
+      if (seek != null) {
+        await player.command(['seek', seek, 'absolute']);
+        await Future<void>.delayed(const Duration(seconds: 1));
+      }
+      final result = await StudySubtitleSync.syncToEnglish(player, null);
+      stdout.writeln(
+        'HARNESS sync offset=${result.offset} "${result.message}" '
+        'sub-delay=${await player.getProperty('sub-delay')}',
+      );
+    }
     stdout.writeln(
       'HARNESS sub-text=${await player.getProperty('sub-text')} '
       'sub-visibility=${await player.getProperty('sub-visibility')} playing=${player.state.playing}',
