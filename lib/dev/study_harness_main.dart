@@ -11,6 +11,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:material_symbols_icons/symbols.dart';
 
 import '../mpv/models.dart';
 import '../mpv/player/player.dart';
@@ -70,6 +71,26 @@ class _HarnessAppState extends State<_HarnessApp> {
       await _capture('$out/hover_$n.png');
     }
 
+    // PLEZY_HARNESS_ANKI=1: click the first entry's "Add to Anki" button.
+    if (env['PLEZY_HARNESS_ANKI'] == '1') {
+      final button = _findIcon(Symbols.add_circle_rounded);
+      stdout.writeln('HARNESS anki button at $button');
+      if (button != null) {
+        // Move onto the popup first, as a user would, so it stays open.
+        GestureBinding.instance.handlePointerEvent(PointerHoverEvent(position: button, kind: PointerDeviceKind.mouse));
+        GestureBinding.instance.handlePointerEvent(PointerDownEvent(position: button, kind: PointerDeviceKind.mouse));
+        GestureBinding.instance.handlePointerEvent(PointerUpEvent(position: button, kind: PointerDeviceKind.mouse));
+        for (var i = 0; i < 60 && _findIcon(Symbols.hourglass_top_rounded) != null || i < 2; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+        }
+        stdout.writeln(
+          'HARNESS anki done=${_findIcon(Symbols.check_circle_rounded) != null} '
+          'failed=${_findIcon(Symbols.error_rounded) != null}',
+        );
+        await _capture('$out/anki.png');
+      }
+    }
+
     GestureBinding.instance.handlePointerEvent(
       const PointerHoverEvent(position: Offset(5, 5), kind: PointerDeviceKind.mouse),
     );
@@ -96,6 +117,23 @@ class _HarnessAppState extends State<_HarnessApp> {
     if (p == null) return null;
     final box = p.getBoxesForSelection(TextSelection(baseOffset: index, extentOffset: index + 1)).first;
     return p.localToGlobal(box.toRect().center);
+  }
+
+  /// Global centre of the first drawn [icon].
+  Offset? _findIcon(IconData icon) {
+    final glyph = String.fromCharCode(icon.codePoint);
+    Offset? found;
+    void visit(RenderObject o) {
+      if (found != null) return;
+      if (o is RenderParagraph && o.text.toPlainText() == glyph) {
+        found = o.localToGlobal(o.size.center(Offset.zero));
+        return;
+      }
+      o.visitChildren(visit);
+    }
+
+    visit(_boundary.currentContext!.findRenderObject()!);
+    return found;
   }
 
   Future<void> _capture(String path) async {

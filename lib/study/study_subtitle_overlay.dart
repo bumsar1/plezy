@@ -1,13 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:material_symbols_icons/symbols.dart';
 
+import '../media/media_item.dart';
 import '../mpv/mpv.dart';
 import '../services/settings_service.dart';
 import '../utils/app_logger.dart';
+import '../widgets/app_icon.dart';
+import 'study_anki.dart';
 import 'study_dictionary.dart';
 import 'study_mode.dart';
 import 'study_strings.dart';
@@ -26,7 +31,10 @@ class StudySubtitleOverlay extends StatefulWidget {
   /// bottom bar doesn't cover it.
   final ValueListenable<bool>? controlsVisible;
 
-  const StudySubtitleOverlay({super.key, required this.player, this.controlsVisible});
+  /// What is playing, for the card's source line.
+  final MediaItem? metadata;
+
+  const StudySubtitleOverlay({super.key, required this.player, this.controlsVisible, this.metadata});
 
   @override
   State<StudySubtitleOverlay> createState() => _StudySubtitleOverlayState();
@@ -64,6 +72,12 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
   bool _pointerInside = false;
   double? _frozenBottom;
 
+  // The popup can be entered (for its Anki buttons); it closes once the
+  // pointer is on neither it nor the subtitle.
+  bool _pointerOnPopup = false;
+  Timer? _closeTimer;
+  final Map<int, _AnkiState> _ankiStates = {};
+
   @override
   void initState() {
     super.initState();
@@ -97,6 +111,7 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
     StudyMode.subtitlesVisible.removeListener(_applyMpvVisibility);
     widget.controlsVisible?.removeListener(_onControlsChanged);
     _poll?.cancel();
+    _closeTimer?.cancel();
     super.dispose();
   }
 
@@ -222,6 +237,55 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
     setState(() {
       _lookup = lookup;
       _wordRect = rect;
+      _ankiStates.clear();
+    });
+  }
+
+  void _scheduleClose() {
+    _closeTimer?.cancel();
+    _closeTimer = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted || _pointerInside || _pointerOnPopup) return;
+      _clearHover(resume: true);
+      // Catch up with any controls change that happened while frozen.
+      setState(() {});
+    });
+  }
+
+  /// The hovered subtitle with the matched word in bold, as card HTML.
+  String _sentenceHtml(StudyEntry entry) {
+    const escape = HtmlEscape(HtmlEscapeMode.element);
+    final lines = _text.split('\n');
+    final line = _hoverLine;
+    final start = _hoverIndex;
+    return [
+      for (var i = 0; i < lines.length; i++)
+        if (i == line && start != null && start < lines[i].length)
+          '${escape.convert(lines[i].substring(0, start))}'
+              '<b>${escape.convert(lines[i].substring(start, math.min(lines[i].length, start + entry.matchLength)))}</b>'
+              '${escape.convert(lines[i].substring(math.min(lines[i].length, start + entry.matchLength)))}'
+        else
+          escape.convert(lines[i]),
+    ].join('<br>');
+  }
+
+  Future<void> _addToAnki(int index, StudyEntry entry) async {
+    final token = _lookupToken;
+    setState(() => _ankiStates[index] = const _AnkiState(_AnkiStatus.adding));
+    final result = await StudyAnki.addCard(
+      entry,
+      StudyMiningContext(
+        sentenceHtml: _sentenceHtml(entry),
+        sourceLabel: StudyMiningContext.labelFor(widget.metadata, widget.player.state.position),
+        player: widget.player,
+      ),
+    );
+    if (!mounted || token != _lookupToken) return;
+    setState(() {
+      _ankiStates[index] = switch (result.outcome) {
+        StudyAnkiOutcome.added => _AnkiState(_AnkiStatus.added, result.message),
+        StudyAnkiOutcome.duplicate => const _AnkiState(_AnkiStatus.added, StudyStrings.ankiDuplicate),
+        StudyAnkiOutcome.failed => _AnkiState(_AnkiStatus.failed, result.message),
+      };
     });
   }
 
@@ -277,12 +341,13 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
     );
 
     return MouseRegion(
-      onEnter: (_) => _pointerInside = true,
+      onEnter: (_) {
+        _pointerInside = true;
+        _closeTimer?.cancel();
+      },
       onExit: (_) {
         _pointerInside = false;
-        _clearHover(resume: true);
-        // Catch up with any controls change that happened while frozen.
-        if (mounted) setState(() {});
+        _scheduleClose();
       },
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -347,10 +412,19 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
       left: left,
       bottom: constraints.maxHeight - word.top + 8,
       width: width,
-      child: IgnorePointer(
+      child: MouseRegion(
+        cursor: SystemMouseCursors.basic,
+        onEnter: (_) {
+          _pointerOnPopup = true;
+          _closeTimer?.cancel();
+        },
+        onExit: (_) {
+          _pointerOnPopup = false;
+          _scheduleClose();
+        },
         child: ConstrainedBox(
           constraints: BoxConstraints(maxHeight: maxHeight),
-          child: _StudyPopup(lookup: lookup),
+          child: _StudyPopup(lookup: lookup, ankiStates: _ankiStates, onAdd: _addToAnki),
         ),
       ),
     );
@@ -373,10 +447,21 @@ class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
   }
 }
 
+enum _AnkiStatus { adding, added, failed }
+
+class _AnkiState {
+  final _AnkiStatus status;
+  final String? message;
+
+  const _AnkiState(this.status, [this.message]);
+}
+
 class _StudyPopup extends StatelessWidget {
   final StudyLookup lookup;
+  final Map<int, _AnkiState> ankiStates;
+  final void Function(int index, StudyEntry entry) onAdd;
 
-  const _StudyPopup({required this.lookup});
+  const _StudyPopup({required this.lookup, required this.ankiStates, required this.onAdd});
 
   static const _muted = Color(0xFFB0B0B8);
   static const _accent = Color(0xFFFFD54F);
@@ -405,7 +490,7 @@ class _StudyPopup extends StatelessWidget {
                 if (lookup.isEmpty) const Text(StudyStrings.noMatch, style: TextStyle(color: _muted)),
                 for (final (i, entry) in lookup.entries.indexed) ...[
                   if (i > 0) const Divider(color: Colors.white12, height: 16),
-                  _entry(entry),
+                  _entry(i, entry),
                 ],
                 if (kanji != null) ...[
                   if (lookup.entries.isNotEmpty) const Divider(color: Colors.white12, height: 16),
@@ -419,23 +504,50 @@ class _StudyPopup extends StatelessWidget {
     );
   }
 
-  Widget _entry(StudyEntry entry) {
+  Widget _ankiButton(int index, StudyEntry entry) {
+    final state = ankiStates[index];
+    final (IconData icon, Color color, String tooltip) = switch (state?.status) {
+      null => (Symbols.add_circle_rounded, Colors.white, StudyStrings.ankiAdd),
+      _AnkiStatus.adding => (Symbols.hourglass_top_rounded, _muted, StudyStrings.ankiAdding),
+      _AnkiStatus.added => (Symbols.check_circle_rounded, const Color(0xFF81C784), StudyStrings.ankiAdded),
+      _AnkiStatus.failed => (Symbols.error_rounded, const Color(0xFFE57373), StudyStrings.ankiRetry),
+    };
+    final enabled = state == null || state.status == _AnkiStatus.failed;
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: enabled ? () => onAdd(index, entry) : null,
+        mouseCursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: AppIcon(icon, size: 22, color: color, fill: state == null ? 0 : 1),
+        ),
+      ),
+    );
+  }
+
+  Widget _entry(int index, StudyEntry entry) {
     final process = entry.process.where((p) => p.isNotEmpty).toList();
+    final message = ankiStates[index]?.message;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text.rich(
-          TextSpan(
-            children: [
-              TextSpan(
-                text: entry.written,
-                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: _accent),
-              ),
-              if (entry.reading.isNotEmpty && entry.reading != entry.written)
-                TextSpan(text: '  ${entry.reading}', style: const TextStyle(fontSize: 15)),
-            ],
-          ),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(child: _headword(entry)),
+            _ankiButton(index, entry),
+          ],
         ),
+        if (message != null)
+          Text(
+            message,
+            style: TextStyle(
+              color: ankiStates[index]?.status == _AnkiStatus.failed ? const Color(0xFFE57373) : _muted,
+              fontSize: 12,
+            ),
+          ),
         if (process.isNotEmpty) Text(process.join(' › '), style: const TextStyle(color: _muted, fontSize: 12)),
         const SizedBox(height: 4),
         for (final (i, sense) in entry.senses.take(5).indexed)
@@ -459,6 +571,21 @@ class _StudyPopup extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+
+  Widget _headword(StudyEntry entry) {
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: entry.written,
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: _accent),
+          ),
+          if (entry.reading.isNotEmpty && entry.reading != entry.written)
+            TextSpan(text: '  ${entry.reading}', style: const TextStyle(fontSize: 15)),
+        ],
+      ),
     );
   }
 

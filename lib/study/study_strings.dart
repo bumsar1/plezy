@@ -9,4 +9,17 @@ class StudyStrings {
   static const loading = 'Loading dictionary…';
   static String failed(String error) => 'Study mode: $error';
   static const noMatch = 'No dictionary match';
+
+  static const ankiAdd = 'Add to Anki';
+  static const ankiAdding = 'Adding to Anki…';
+  static const ankiAdded = 'Added to Anki';
+  static const ankiRetry = 'Failed — click to try again';
+  static const ankiDuplicate = 'Already in this deck';
+
+  static const settingsTitle = 'Study mode';
+  static const deckTitle = 'Anki deck';
+  static const noteTypeTitle = 'Anki note type';
+  static const noteTypeAuto = 'Automatic (Lapis if installed, else Basic)';
+  static String ffmpegStatus(String? path) => path ?? 'Not found — install ffmpeg for sentence audio and GIFs';
+  static const ffmpegTitle = 'ffmpeg';
 }

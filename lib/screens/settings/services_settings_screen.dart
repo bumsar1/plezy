@@ -14,6 +14,7 @@ import '../../widgets/focusable_list_tile.dart';
 import '../../widgets/setting_tile.dart';
 import '../../widgets/settings_section.dart';
 import 'jimaku_settings_tile.dart';
+import 'study_settings_tile.dart';
 import 'seerr_connect_screen.dart';
 import 'seerr_settings_screen.dart';
 import 'tracker_service_info.dart';
@@ -54,6 +55,7 @@ class ServicesSettingsScreen extends StatelessWidget {
                 ],
               ),
             const JimakuSettingsGroup(),
+            const StudySettingsGroup(),
             const SizedBox(height: 24),
           ]),
         ),

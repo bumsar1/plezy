@@ -349,7 +349,11 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
               // controls so hover reaches it; claims hits only on the text.
               if (player != null)
                 Positioned.fill(
-                  child: StudySubtitleOverlay(player: player!, controlsVisible: _chromeController),
+                  child: StudySubtitleOverlay(
+                    player: player!,
+                    controlsVisible: _chromeController,
+                    metadata: widget.metadata,
+                  ),
                 ),
               // Netflix-style auto-play overlay (hidden in PiP mode)
               VideoPlayerPlayNextOverlay(
