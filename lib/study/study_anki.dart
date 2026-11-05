@@ -116,9 +116,11 @@ class StudyAnki {
         ..set(_FieldRole.reading, entry.reading.isEmpty ? entry.written : entry.reading)
         ..set(_FieldRole.furigana, furigana(entry.written, entry.reading))
         ..set(_FieldRole.meaning, glossary)
-        ..set(_FieldRole.glossary, glossary)
         ..set(_FieldRole.sentence, context.sentenceHtml)
         ..set(_FieldRole.source, context.sourceLabel ?? '');
+      // Lapis shows MainDefinition and Glossary both, so the definition goes in
+      // only one of them: Glossary only when there is no main-definition field.
+      if (fields.fieldFor(_FieldRole.meaning) == null) fields.set(_FieldRole.glossary, glossary);
       // Lapis: a word card that also shows the sentence, like the user's Yomitan setup.
       if (fieldNames.contains('IsWordAndSentenceCard')) fields.raw['IsWordAndSentenceCard'] = 'x';
       if (fields.isBasic) {
