@@ -253,10 +253,16 @@ class StudyAnki {
     if (from < 0) from = 0;
     if (to - from > _maxClip.inSeconds) to = from + _maxClip.inSeconds;
 
-    final input = <String>[
-      ..._headerArgs(await player.getProperty('http-header-fields')),
+    final headers = _headerArgs(await player.getProperty('http-header-fields'));
+    // Duration on the input side: as an output option ffmpeg keeps reading
+    // until the input ends, and palettegen waits for that end, so a GIF from
+    // a Plex stream would download the rest of the episode first.
+    List<String> input(double seconds) => [
+      ...headers,
       '-ss',
       from.toStringAsFixed(3),
+      '-t',
+      seconds.toStringAsFixed(3),
       '-i',
       source,
     ];
@@ -269,19 +275,27 @@ class StudyAnki {
 
     final results = await Future.wait([
       _runFfmpeg(ffmpeg, [
-        ...input,
-        '-t', (to - from).toStringAsFixed(3), //
-        '-map', audioIndex == null || audioIndex.isEmpty ? '0:a:0' : '0:$audioIndex',
-        '-vn', '-ac', '2', '-c:a', 'libmp3lame', '-q:a', '4',
+        ...input(to - from),
+        '-map',
+        audioIndex == null || audioIndex.isEmpty ? '0:a:0' : '0:$audioIndex',
+        '-vn',
+        '-ac',
+        '2',
+        '-c:a',
+        'libmp3lame',
+        '-q:a',
+        '4',
         audioFile.path,
       ]),
       _runFfmpeg(ffmpeg, [
-        ...input,
-        '-t', gifLength.toStringAsFixed(3), //
-        '-map', '0:v:0', '-an',
+        ...input(gifLength),
+        '-map',
+        '0:v:0',
+        '-an',
         '-vf',
         'fps=10,scale=480:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=bayer',
-        '-loop', '0',
+        '-loop',
+        '0',
         gifFile.path,
       ]),
     ]);
@@ -312,15 +326,19 @@ class StudyAnki {
 
   static Future<bool> _runFfmpeg(String ffmpeg, List<String> args) async {
     try {
-      final result = await Process.run(ffmpeg, [
-        '-hide_banner',
-        '-loglevel',
-        'error',
-        '-y',
-        ...args,
-      ]).timeout(const Duration(seconds: 60));
-      if (result.exitCode != 0) appLogger.w('Study mode: ffmpeg failed: ${result.stderr}');
-      return result.exitCode == 0;
+      final process = await Process.start(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', ...args]);
+      final stderr = process.stderr.transform(utf8.decoder).join();
+      unawaited(process.stdout.drain<void>());
+      // A Future timeout alone would leave ffmpeg running; kill it.
+      final exitCode = await process.exitCode.timeout(
+        const Duration(seconds: 60),
+        onTimeout: () {
+          process.kill();
+          return -1;
+        },
+      );
+      if (exitCode != 0) appLogger.w('Study mode: ffmpeg failed ($exitCode): ${await stderr}');
+      return exitCode == 0;
     } catch (e) {
       appLogger.w('Study mode: ffmpeg did not run', error: e);
       return false;
