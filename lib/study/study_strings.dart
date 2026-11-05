@@ -35,4 +35,6 @@ class StudyStrings {
   static const syncTitle = 'Sync subtitles to English';
   static const syncSubtitle = 'Line the selected subtitles up with the video\'s English track';
   static const syncing = 'Syncing…';
+  static String syncTimedOut(String? step) => 'Gave up after 3 minutes${step == null ? '' : ' at: $step'}';
+  static String syncFailed(String error) => 'Sync failed: $error';
 }

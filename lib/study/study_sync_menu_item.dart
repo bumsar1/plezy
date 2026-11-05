@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
 import '../media/media_item.dart';
 import '../mpv/mpv.dart';
 import '../theme/mono_tokens.dart';
+import '../utils/app_logger.dart';
 import '../widgets/app_icon.dart';
 import '../widgets/focusable_list_tile.dart';
 import 'study_strings.dart';
@@ -30,11 +33,26 @@ class _StudySyncMenuItemState extends State<StudySyncMenuItem> {
       _running = true;
       _status = StudyStrings.syncing;
     });
-    final result = await StudySubtitleSync.syncToEnglish(widget.player, widget.metadata);
+    String message;
+    try {
+      final result = await StudySubtitleSync.syncToEnglish(
+        widget.player,
+        widget.metadata,
+        onStatus: (s) {
+          if (mounted) setState(() => _status = s);
+        },
+      ).timeout(const Duration(minutes: 3));
+      message = result.message;
+    } on TimeoutException {
+      message = StudyStrings.syncTimedOut(_status);
+    } catch (e, st) {
+      appLogger.w('Study sync failed', error: e, stackTrace: st);
+      message = StudyStrings.syncFailed('$e');
+    }
     if (!mounted) return;
     setState(() {
       _running = false;
-      _status = result.message;
+      _status = message;
     });
   }
 

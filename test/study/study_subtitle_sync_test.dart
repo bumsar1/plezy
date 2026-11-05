@@ -50,7 +50,47 @@ Dialogue: 0,1:02:03.45,1:02:04.00,Main,,0,0,0,,Late
     }
     final best = StudySubtitleSync.bestOffset(english, japanese)!;
     expect(best.offset, closeTo(2.4, 0.15));
-    expect(best.coverage, greaterThan(0.5));
+    expect(best.confident, isTrue);
+  });
+
+  test('stays exact when the subtitle merges English lines', () {
+    final random = Random(9);
+    final english = <SubtitleLine>[];
+    var t = 700.0;
+    while (t < 760) {
+      final d = 0.8 + random.nextDouble() * 2;
+      english.add(SubtitleLine(t, t + d));
+      t += d + 0.3 + random.nextDouble() * 1.5;
+    }
+    // Japanese 11.6 s early, pairs of English lines merged into one line.
+    final japanese = <SubtitleLine>[
+      for (var i = 0; i + 1 < english.length; i += 2)
+        SubtitleLine(english[i].start - 11.6 + (random.nextDouble() - 0.5) * 0.2, english[i + 1].end - 11.6),
+    ];
+    final best = StudySubtitleSync.bestOffset(english, japanese)!;
+    expect(best.offset, closeTo(11.6, 0.12));
+  });
+
+  test('is not fooled by dense captions that overlap any shift', () {
+    // Like Netflix CC: back-to-back lines, so overlap is ~100 % everywhere.
+    final random = Random(21);
+    final japanese = <SubtitleLine>[];
+    var t = 600.0;
+    while (t < 820) {
+      final d = 1.2 + random.nextDouble() * 2.8;
+      japanese.add(SubtitleLine(t, t + d));
+      t += d + (random.nextDouble() < 0.3 ? random.nextDouble() * 1.5 : 0);
+    }
+    // English: 12 of those lines in a 50 s window, 9.3 s earlier, own timing.
+    final english = [
+      for (final j in japanese.where((j) => j.start > 728 && j.start < 778).take(12))
+        SubtitleLine(
+          j.start - 9.3 + (random.nextDouble() - 0.5) * 0.3,
+          j.end - 9.3 + (random.nextDouble() - 0.5) * 0.3,
+        ),
+    ];
+    final best = StudySubtitleSync.bestOffset(english, japanese)!;
+    expect(best.offset, closeTo(-9.3, 0.15));
   });
 
   test('gives up when nothing lines up', () {

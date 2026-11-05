@@ -36,7 +36,7 @@ class StudySubtitleSync {
   StudySubtitleSync._();
 
   static const _window = 90.0;
-  static const _partWindow = 50.0;
+  static const _partWindow = 60.0;
   static const _maxShift = 90.0;
 
   /// A pause in the speech at least this long can separate two parts.
@@ -49,7 +49,14 @@ class StudySubtitleSync {
   static const _sameShift = 0.3;
   static const _textCodecs = {'subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'};
 
-  static Future<StudySyncResult> syncToEnglish(Player player, MediaItem? item) async {
+  /// [onStatus] gets a short line for each step, so a slow stream shows
+  /// where it is.
+  static Future<StudySyncResult> syncToEnglish(
+    Player player,
+    MediaItem? item, {
+    void Function(String status)? onStatus,
+  }) async {
+    final status = onStatus ?? (_) {};
     final ffmpeg = await StudyFfmpeg.find();
     if (ffmpeg == null) return const StudySyncResult(null, 'Needs ffmpeg');
 
@@ -68,11 +75,13 @@ class StudySubtitleSync {
 
     final file = primary.externalFile;
     if (file != null && !file.startsWith('http') && RegExp(r'\.(srt|ass|ssa)$', caseSensitive: false).hasMatch(file)) {
-      return _retimeFile(player, item, ffmpeg, primary, File(file), english, source, headers);
+      return _retimeFile(player, item, ffmpeg, primary, File(file), english, source, headers, status);
     }
 
     final from = math.max(0.0, position - _window / 2);
+    status('Reading English lines…');
     final reference = await _lines(ffmpeg, english, source, headers, (from: from, to: from + _window), 'reference');
+    status('Reading subtitle lines…');
     final target = await _lines(ffmpeg, primary, source, headers, null, 'target');
     if (reference == null || reference.length < 3) {
       return const StudySyncResult(null, 'Could not read the English lines');
@@ -82,9 +91,10 @@ class StudySubtitleSync {
     final best = bestOffset(reference, target);
     appLogger.i(
       'Study sync: ${reference.length} English lines near ${position.toStringAsFixed(1)} s, '
-      '${target.length} subtitle lines; best ${best?.offset} s covering ${best?.coverage}',
+      '${target.length} subtitle lines; best ${best?.offset} s (confident: ${best?.confident})',
     );
     if (best == null) return const StudySyncResult(null, 'No matching timing found');
+    if (!best.confident) return const StudySyncResult(null, 'Timing is unclear here — try at a spot with more talking');
 
     final ms = await _setDelay(player, item, best.offset);
     return StudySyncResult(
@@ -117,6 +127,7 @@ class StudySubtitleSync {
     _Track english,
     String? source,
     List<String> headers,
+    void Function(String) status,
   ) async {
     final bytes = await file.readAsBytes();
     final hasBom = bytes.length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
@@ -142,11 +153,44 @@ class StudySubtitleSync {
     // two that disagree the middle one, halving until each shift change is
     // pinned to one pause. A constant shift costs two windows.
     final slots = _Slots(3);
+    final uncertain = <int>{};
     final measured = <int, Future<double?>>{};
+    var checked = 0;
     Future<double?> measure(int i) => measured[i] ??= slots.run(() async {
-      final reference = await _lines(ffmpeg, english, source, headers, windowFor(parts[i]), 'reference_$i');
-      if (reference == null || reference.length < 3) return null;
-      return bestOffset(reference, parts[i])?.offset;
+      status(checked == 0 ? 'Checking the timing…' : 'Checking the timing… $checked done');
+      // When two shifts fit about equally well, read the stretch after (then
+      // before) the window too and decide on all the lines together.
+      final window = windowFor(parts[i]);
+      final length = window.to - window.from;
+      final windows = [
+        window,
+        (from: window.to, to: window.to + length),
+        if (window.from > 0) (from: math.max(0.0, window.from - length), to: window.from),
+      ];
+      final reference = <SubtitleLine>[];
+      double? guess;
+      for (final (n, w) in windows.indexed) {
+        final lines = await _lines(ffmpeg, english, source, headers, w, 'reference_${i}_$n');
+        // Windows meet, and a seek can start a little early: skip repeats.
+        for (final l in lines ?? const <SubtitleLine>[]) {
+          if (!reference.any((r) => (r.start - l.start).abs() < 0.01)) reference.add(l);
+        }
+        if (reference.length < 3) continue;
+        final best = bestOffset(reference, parts[i]);
+        appLogger.i(
+          'Study sync: part $i, ${reference.length} English lines → ${best?.offset} (confident: ${best?.confident})',
+        );
+        if (best != null && best.confident) {
+          checked++;
+          return best.offset;
+        }
+        guess = best?.offset ?? guess;
+      }
+      // Still two candidates after all windows: its own best guess beats a
+      // neighbour's shift, which is known to be wrong across a cut.
+      checked++;
+      if (guess != null) uncertain.add(i);
+      return guess;
     });
     final offsets = List<double?>.filled(parts.length, null);
     Future<void> solve(int lo, int hi) async {
@@ -184,6 +228,7 @@ class StudySubtitleSync {
 
     // Parts meet halfway through the pause between them.
     final boundaries = [for (var i = 1; i < parts.length; i++) (parts[i - 1].last.end + parts[i].first.start) / 2];
+    status('Writing synced subtitles…');
     final retimed = retimeSubtitle(text, isAss: isAss, boundaries: boundaries, offsets: filled);
 
     // Jimaku files live in Plezy's own folders: rewrite them in place (the
@@ -207,6 +252,7 @@ class StudySubtitleSync {
       ...utf8.encode(retimed),
     ]);
 
+    status('Reloading subtitles…');
     if (ownFile) {
       await player.command(['sub-reload', primary.id]);
     } else {
@@ -223,7 +269,8 @@ class StudySubtitleSync {
       0,
       shifts.length == 1
           ? 'Synced: ${_signed(shifts.single)} throughout'
-          : 'Synced in ${shifts.length} parts: ${shifts.map(_signed).join(' → ')}',
+          : 'Synced in ${shifts.length} parts: ${shifts.map(_signed).join(' → ')}'
+                '${uncertain.isEmpty ? '' : ' (${uncertain.length} part${uncertain.length == 1 ? '' : 's'} uncertain)'}',
     );
   }
 
@@ -429,80 +476,93 @@ class StudySubtitleSync {
     return int.parse(m[1]!) * 3600 + int.parse(m[2]!) * 60 + int.parse(m[3]!) + frac;
   }
 
-  /// The shift `d` (seconds) that makes [target] lines, moved by `d`, overlap
-  /// [reference] lines the most. Overlap rather than start times because two
-  /// subtitle tracks are timed by different people and split lines
-  /// differently. Null when under 30 % of the speech is covered.
+  /// The shift `d` (seconds) that lines [target] up with [reference]: the one
+  /// where the most reference lines start and end where a target line,
+  /// moved by `d`, starts and ends. Boundaries rather than overlap, because
+  /// dense subtitles (Netflix CC captions sounds and breaths too) overlap
+  /// anything at almost any shift. Each boundary counts softly by how close
+  /// it lands, then the shift is refined on mutual nearest starts.
+  ///
+  /// [confident] is false when another shift (more than 1.5 s away) scores
+  /// nearly as well: two different alignments fit and more lines are needed.
+  /// Null when under a third of the reference boundaries line up at all.
   @visibleForTesting
-  static ({double offset, int matched, double coverage})? bestOffset(
+  static ({double offset, int matched, bool confident})? bestOffset(
     List<SubtitleLine> reference,
     List<SubtitleLine> target,
   ) {
-    final ref = _union(reference);
-    final refTotal = ref.fold(0.0, (sum, l) => sum + l.end - l.start);
-    if (refTotal <= 0) return null;
-    final from = ref.first.start - _maxShift;
-    final to = ref.last.end + _maxShift;
-    final tgt = _union([
-      for (final l in target)
-        if (l.end > from && l.start < to) l,
-    ]);
-    if (tgt.isEmpty) return null;
+    if (reference.isEmpty || target.isEmpty) return null;
+    final starts = [for (final t in target) t.start]..sort();
+    final ends = [for (final t in target) t.end]..sort();
 
-    double overlapAt(double d) {
+    double score(double d, double tolerance) {
       var total = 0.0;
-      var j = 0;
-      for (final r in ref) {
-        while (j < tgt.length && tgt[j].end + d <= r.start) {
-          j++;
-        }
-        for (var k = j; k < tgt.length && tgt[k].start + d < r.end; k++) {
-          total += math.min(r.end, tgt[k].end + d) - math.max(r.start, tgt[k].start + d);
-        }
+      for (final r in reference) {
+        total += math.max(0, 1 - _distance(starts, r.start - d) / tolerance);
+        total += math.max(0, 1 - _distance(ends, r.end - d) / tolerance);
       }
       return total;
     }
 
-    // Coarse sweep, then a fine one around the peak; the middle of the fine
-    // plateau is the answer (overlap is flat while edges don't line up).
-    var best = 0.0;
-    var bestScore = -1.0;
-    for (var d = -_maxShift; d <= _maxShift; d += 0.1) {
-      final score = overlapAt(d);
-      if (score > bestScore) {
-        bestScore = score;
-        best = d;
+    final coarse = <({double d, double score})>[
+      for (var i = -(_maxShift * 20).round(); i <= (_maxShift * 20).round(); i++)
+        (d: i / 20, score: score(i / 20, 0.5)),
+    ];
+    final top = coarse.reduce((a, b) => b.score > a.score ? b : a);
+    final runnerUp = coarse.where((c) => (c.d - top.d).abs() > 1.5).map((c) => c.score).fold(0.0, math.max);
+    if (top.score < reference.length * 2 / 3) return null;
+
+    // Fine pass with a tighter tolerance, then mutual nearest starts.
+    var offset = top.d;
+    var fineBest = -1.0;
+    for (var d = top.d - 0.5; d <= top.d + 0.5; d += 0.01) {
+      final s = score(d, 0.25);
+      if (s > fineBest) {
+        fineBest = s;
+        offset = d;
       }
     }
-    final fine = <({double d, double score})>[
-      for (var d = best - 0.3; d <= best + 0.3; d += 0.01) (d: d, score: overlapAt(d)),
-    ];
-    final peak = fine.map((f) => f.score).reduce(math.max);
-    final plateau = fine.where((f) => f.score >= peak * 0.995).map((f) => f.d).toList();
-    final offset = (plateau.first + plateau.last) / 2;
+    int nearest(List<SubtitleLine> lines, double at) {
+      var best = 0;
+      for (var i = 1; i < lines.length; i++) {
+        if ((lines[i].start - at).abs() < (lines[best].start - at).abs()) best = i;
+      }
+      return best;
+    }
 
-    // Measured against whichever side has less speech here: a window may hold
-    // more English than the part being matched, or the other way round.
-    final tgtTotal = tgt.fold(0.0, (sum, l) => sum + l.end - l.start);
-    final coverage = peak / math.min(refTotal, tgtTotal);
+    final diffs = <double>[];
+    for (final r in reference) {
+      final t = target[nearest(target, r.start - offset)];
+      final back = reference[nearest(reference, t.start + offset)];
+      if (identical(back, r) && (t.start + offset - r.start).abs() <= 0.5) diffs.add(r.start - t.start);
+    }
+    if (diffs.length >= 3) {
+      diffs.sort();
+      offset = diffs[diffs.length ~/ 2];
+    }
+
     final matched = reference
-        .where((r) => target.any((t) => t.start + offset < r.end && t.end + offset > r.start))
+        .where((r) => _distance(starts, r.start - offset) <= 0.5 || _distance(ends, r.end - offset) <= 0.5)
         .length;
-    if (coverage < 0.3 || matched < 3) return null;
-    return (offset: offset, matched: matched, coverage: coverage);
+    if (matched < 3) return null;
+    return (offset: offset, matched: matched, confident: top.score >= runnerUp * 1.25);
   }
 
-  static List<SubtitleLine> _union(List<SubtitleLine> lines) {
-    final sorted = [...lines]..sort((a, b) => a.start.compareTo(b.start));
-    final out = <SubtitleLine>[];
-    for (final l in sorted) {
-      if (out.isNotEmpty && l.start <= out.last.end) {
-        if (l.end > out.last.end) out[out.length - 1] = SubtitleLine(out.last.start, l.end);
+  static double _distance(List<double> sorted, double x) {
+    var lo = 0;
+    var hi = sorted.length;
+    while (lo < hi) {
+      final mid = (lo + hi) ~/ 2;
+      if (sorted[mid] < x) {
+        lo = mid + 1;
       } else {
-        out.add(l);
+        hi = mid;
       }
     }
-    return out;
+    var best = double.infinity;
+    if (lo < sorted.length) best = sorted[lo] - x;
+    if (lo > 0) best = math.min(best, x - sorted[lo - 1]);
+    return best;
   }
 }
 

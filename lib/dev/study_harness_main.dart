@@ -62,7 +62,11 @@ class _HarnessAppState extends State<_HarnessApp> {
         await player.command(['seek', seek, 'absolute']);
         await Future<void>.delayed(const Duration(seconds: 1));
       }
-      final result = await StudySubtitleSync.syncToEnglish(player, null);
+      final result = await StudySubtitleSync.syncToEnglish(
+        player,
+        null,
+        onStatus: (s) => stdout.writeln('HARNESS status: $s'),
+      );
       stdout.writeln(
         'HARNESS sync offset=${result.offset} "${result.message}" '
         'sub-delay=${await player.getProperty('sub-delay')}',
