@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -23,15 +24,29 @@ class StudySyncResult {
 /// Lines the primary (usually Japanese, e.g. from Jimaku) subtitle up with an
 /// English track of the video itself, which is timed to this exact release.
 ///
-/// Both tracks' line start times are read with ffmpeg and the constant shift
-/// that makes the most lines start together becomes `sub-delay`. For an
-/// embedded English track only a window around the playhead is read, so a
-/// Plex stream isn't downloaded whole.
+/// When the subtitle is a local .srt/.ass file (Jimaku's always are), the
+/// whole file is retimed: it is split into parts at pauses in the speech
+/// (where a different cut of the episode - a longer intro, an ad break -
+/// moves everything after it), each part's shift is measured against a short
+/// window of the English track, and the file is rewritten with those shifts
+/// and reloaded, so it stays right on later plays. Otherwise one constant
+/// shift near the playhead becomes `sub-delay`. Only windows of an embedded
+/// English track are read, so a Plex stream isn't downloaded whole.
 class StudySubtitleSync {
   StudySubtitleSync._();
 
   static const _window = 90.0;
-  static const _maxShift = 60.0;
+  static const _partWindow = 50.0;
+  static const _maxShift = 90.0;
+
+  /// A pause in the speech at least this long can separate two parts.
+  static const _partGap = 15.0;
+
+  /// Parts with fewer lines are too short to measure and join a neighbour.
+  static const _minPartLines = 6;
+
+  /// Shifts this close count as the same.
+  static const _sameShift = 0.3;
   static const _textCodecs = {'subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'};
 
   static Future<StudySyncResult> syncToEnglish(Player player, MediaItem? item) async {
@@ -51,7 +66,13 @@ class StudySubtitleSync {
     final headers = StudyFfmpeg.headerArgs(await player.getProperty('http-header-fields'));
     final position = double.tryParse(await player.getProperty('time-pos') ?? '') ?? 0;
 
-    final reference = await _lines(ffmpeg, english, source, headers, position, 'reference');
+    final file = primary.externalFile;
+    if (file != null && !file.startsWith('http') && RegExp(r'\.(srt|ass|ssa)$', caseSensitive: false).hasMatch(file)) {
+      return _retimeFile(player, item, ffmpeg, primary, File(file), english, source, headers);
+    }
+
+    final from = math.max(0.0, position - _window / 2);
+    final reference = await _lines(ffmpeg, english, source, headers, (from: from, to: from + _window), 'reference');
     final target = await _lines(ffmpeg, primary, source, headers, null, 'target');
     if (reference == null || reference.length < 3) {
       return const StudySyncResult(null, 'Could not read the English lines');
@@ -65,19 +86,235 @@ class StudySubtitleSync {
     );
     if (best == null) return const StudySyncResult(null, 'No matching timing found');
 
-    final ms = (best.offset * 1000).round().clamp(
+    final ms = await _setDelay(player, item, best.offset);
+    return StudySyncResult(
+      ms / 1000,
+      'Shifted ${_signed(ms / 1000)} · ${best.matched}/${reference.length} lines match',
+    );
+  }
+
+  /// Applies and remembers (for this episode, like a manual subtitle sync)
+  /// a sub-delay of [seconds]; returns it in whole milliseconds.
+  static Future<int> _setDelay(Player player, MediaItem? item, double seconds) async {
+    final ms = (seconds * 1000).round().clamp(
       ScopedPlayerPrefs.minimumSyncOffsetMs,
       ScopedPlayerPrefs.maximumSyncOffsetMs,
     );
     await player.setProperty(PlayerSyncOffsets.subtitleProperty, (ms / 1000).toString());
     PlayerSyncOffsets.of(player).recordApplied(PlayerSyncOffsets.subtitleProperty, ms);
-    // Remembered for this episode like a manual subtitle sync.
     if (item != null) await ScopedPlayerPrefs.write(ScopedPlayerPrefs.subtitleSyncOffset, item, ms);
-    final sign = ms >= 0 ? '+' : '−';
-    return StudySyncResult(
-      ms / 1000,
-      'Shifted $sign${(ms.abs() / 1000).toStringAsFixed(2)} s · ${best.matched}/${reference.length} lines match',
+    return ms;
+  }
+
+  static String _signed(double seconds) => '${seconds >= 0 ? '+' : '−'}${seconds.abs().toStringAsFixed(2)} s';
+
+  static Future<StudySyncResult> _retimeFile(
+    Player player,
+    MediaItem? item,
+    String ffmpeg,
+    _Track primary,
+    File file,
+    _Track english,
+    String? source,
+    List<String> headers,
+  ) async {
+    final bytes = await file.readAsBytes();
+    final hasBom = bytes.length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+    final text = utf8.decode(hasBom ? bytes.sublist(3) : bytes, allowMalformed: true);
+    final isAss = !file.path.toLowerCase().endsWith('.srt');
+    final spoken = isAss ? parseAssLines(text) : parseSrtLines(text);
+    final parts = splitParts(spoken);
+    if (parts.isEmpty) return const StudySyncResult(null, 'Could not read the subtitle lines');
+
+    // Each part's window in video time, placed with the delay already applied
+    // (a part shifts by at most a minute or so from there).
+    final delay = double.tryParse(await player.getProperty(PlayerSyncOffsets.subtitleProperty) ?? '') ?? 0;
+    ({double from, double to}) windowFor(List<SubtitleLine> part) {
+      final a = part.first.start + delay;
+      final b = part.last.end + delay;
+      // A short part gets room on both sides for a shift of up to ~30 s.
+      if (b - a <= _partWindow) return (from: math.max(0.0, a - 30), to: b + 30);
+      final mid = (a + b) / 2;
+      return (from: math.max(0.0, mid - _partWindow / 2), to: mid + _partWindow / 2);
+    }
+
+    // Measure as few parts as possible: the first and the last, and between
+    // two that disagree the middle one, halving until each shift change is
+    // pinned to one pause. A constant shift costs two windows.
+    final slots = _Slots(3);
+    final measured = <int, Future<double?>>{};
+    Future<double?> measure(int i) => measured[i] ??= slots.run(() async {
+      final reference = await _lines(ffmpeg, english, source, headers, windowFor(parts[i]), 'reference_$i');
+      if (reference == null || reference.length < 3) return null;
+      return bestOffset(reference, parts[i])?.offset;
+    });
+    final offsets = List<double?>.filled(parts.length, null);
+    Future<void> solve(int lo, int hi) async {
+      final [a, b] = await Future.wait([measure(lo), measure(hi)]);
+      offsets[lo] = a;
+      offsets[hi] = b;
+      if (hi - lo <= 1) return;
+      if (a != null && b != null && (a - b).abs() <= _sameShift) {
+        for (var i = lo + 1; i < hi; i++) {
+          offsets[i] = (a + b) / 2;
+        }
+        return;
+      }
+      final mid = (lo + hi) ~/ 2;
+      await Future.wait([solve(lo, mid), solve(mid, hi)]);
+    }
+
+    await solve(0, parts.length - 1);
+    appLogger.i(
+      'Study sync: ${parts.length} parts ${[for (final p in parts) p.length]}, '
+      '${measured.length} measured, offsets $offsets',
     );
+    if (offsets.every((o) => o == null)) return const StudySyncResult(null, 'No matching timing found');
+    // A part that couldn't be measured takes its nearest measured neighbour's shift.
+    final filled = [
+      for (var i = 0; i < offsets.length; i++)
+        offsets[i] ??
+            [
+              for (var k = 1; k < offsets.length; k++) ...[
+                if (i - k >= 0) offsets[i - k],
+                if (i + k < offsets.length) offsets[i + k],
+              ],
+            ].firstWhere((o) => o != null)!,
+    ];
+
+    // Parts meet halfway through the pause between them.
+    final boundaries = [for (var i = 1; i < parts.length; i++) (parts[i - 1].last.end + parts[i].first.start) / 2];
+    final retimed = retimeSubtitle(text, isAss: isAss, boundaries: boundaries, offsets: filled);
+
+    // Jimaku files live in Plezy's own folders: rewrite them in place (the
+    // remembered subtitle then stays synced), keeping the original once.
+    // Anything else gets a synced copy alongside in the cache.
+    final appDirs = [(await getApplicationSupportDirectory()).path, (await getTemporaryDirectory()).path];
+    final ownFile = appDirs.any(file.path.startsWith);
+    final out = ownFile
+        ? file
+        : File(
+            '${(await getTemporaryDirectory()).path}${Platform.pathSeparator}plezy_study${Platform.pathSeparator}'
+            'synced_${file.uri.pathSegments.last}',
+          );
+    if (ownFile) {
+      final backup = File('${file.path}.orig');
+      if (!await backup.exists()) await file.copy(backup.path);
+    }
+    await out.parent.create(recursive: true);
+    await out.writeAsBytes([
+      if (hasBom) ...[0xEF, 0xBB, 0xBF],
+      ...utf8.encode(retimed),
+    ]);
+
+    if (ownFile) {
+      await player.command(['sub-reload', primary.id]);
+    } else {
+      await player.command(['sub-add', out.path, 'select', '${primary.title} (synced)', 'ja']);
+    }
+    await _setDelay(player, item, 0);
+
+    // Neighbouring parts with the same shift read as one in the summary.
+    final shifts = <double>[];
+    for (final o in filled) {
+      if (shifts.isEmpty || (shifts.last - o).abs() > _sameShift) shifts.add(o);
+    }
+    return StudySyncResult(
+      0,
+      shifts.length == 1
+          ? 'Synced: ${_signed(shifts.single)} throughout'
+          : 'Synced in ${shifts.length} parts: ${shifts.map(_signed).join(' → ')}',
+    );
+  }
+
+  /// Splits spoken lines into parts at pauses of [_partGap] or more; parts
+  /// with under [_minPartLines] lines join their neighbour.
+  @visibleForTesting
+  static List<List<SubtitleLine>> splitParts(List<SubtitleLine> lines) {
+    final sorted = [...lines]..sort((a, b) => a.start.compareTo(b.start));
+    final parts = <List<SubtitleLine>>[];
+    for (final l in sorted) {
+      if (parts.isEmpty || l.start - parts.last.map((x) => x.end).reduce(math.max) >= _partGap) {
+        parts.add([l]);
+      } else {
+        parts.last.add(l);
+      }
+    }
+    for (var i = 0; i < parts.length && parts.length > 1;) {
+      if (parts[i].length >= _minPartLines) {
+        i++;
+        continue;
+      }
+      final small = parts.removeAt(i);
+      if (i == 0) {
+        parts[0].insertAll(0, small);
+      } else {
+        parts[i - 1].addAll(small);
+        i = i - 1;
+      }
+    }
+    return parts;
+  }
+
+  static final _srtTiming = RegExp(r'(\d+):(\d\d):(\d\d)[,.](\d{3})(\s*-->\s*)(\d+):(\d\d):(\d\d)[,.](\d{3})');
+
+  /// Every line of an SRT document, sorted.
+  @visibleForTesting
+  static List<SubtitleLine> parseSrtLines(String srt) => [
+    for (final m in _srtTiming.allMatches(srt))
+      SubtitleLine(_hms(m[1]!, m[2]!, m[3]!, m[4]!), _hms(m[6]!, m[7]!, m[8]!, m[9]!)),
+  ]..sort((a, b) => a.start.compareTo(b.start));
+
+  static double _hms(String h, String m, String s, String frac) =>
+      int.parse(h) * 3600 + int.parse(m) * 60 + int.parse(s) + double.parse('0.$frac');
+
+  /// [text] (SRT, or ASS when [isAss]) with every line moved by the offset of
+  /// the part its start falls in: before `boundaries[0]` → `offsets[0]`, and
+  /// so on. Signs and songs move with the speech around them.
+  @visibleForTesting
+  static String retimeSubtitle(
+    String text, {
+    required bool isAss,
+    required List<double> boundaries,
+    required List<double> offsets,
+  }) {
+    double offsetAt(double start) => offsets[boundaries.where((b) => start >= b).length];
+    if (!isAss) {
+      return text.replaceAllMapped(_srtTiming, (m) {
+        final start = _hms(m[1]!, m[2]!, m[3]!, m[4]!);
+        final end = _hms(m[6]!, m[7]!, m[8]!, m[9]!);
+        final d = offsetAt(start);
+        return '${_srtTime(start + d)}${m[5]}${_srtTime(end + d)}';
+      });
+    }
+    return text
+        .split('\n')
+        .map((line) {
+          final match = RegExp(r'^(Dialogue|Comment):\s*').firstMatch(line);
+          if (match == null) return line;
+          final fields = line.substring(match.end).split(',');
+          if (fields.length < 10) return line;
+          final start = _parseAssTime(fields[1].trim());
+          final end = _parseAssTime(fields[2].trim());
+          if (start == null || end == null) return line;
+          final d = offsetAt(start);
+          fields[1] = _assTimeString(start + d);
+          fields[2] = _assTimeString(end + d);
+          return '${match[0]}${fields.join(',')}';
+        })
+        .join('\n');
+  }
+
+  static String _srtTime(double seconds) {
+    final ms = (math.max(0.0, seconds) * 1000).round();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(ms ~/ 3600000)}:${two(ms ~/ 60000 % 60)}:${two(ms ~/ 1000 % 60)},${(ms % 1000).toString().padLeft(3, '0')}';
+  }
+
+  static String _assTimeString(double seconds) {
+    final cs = (math.max(0.0, seconds) * 100).round();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${cs ~/ 360000}:${two(cs ~/ 6000 % 60)}:${two(cs ~/ 100 % 60)}.${two(cs % 100)}';
   }
 
   static Future<List<_Track>> _subtitleTracks(Player player) async {
@@ -110,7 +347,7 @@ class StudySubtitleSync {
   }
 
   /// Spoken lines of [track] (signs, songs and karaoke left out). With
-  /// [around] set, an embedded track is read only in a window centred there.
+  /// [window] set, an embedded track is read only in that stretch.
   /// The raw extract is kept in the temp folder as sync_[label].ass for
   /// diagnosing a sync that went wrong.
   static Future<List<SubtitleLine>?> _lines(
@@ -118,7 +355,7 @@ class StudySubtitleSync {
     _Track track,
     String? source,
     List<String> headers,
-    double? around,
+    ({double from, double to})? window,
     String label,
   ) async {
     final List<String> args;
@@ -126,7 +363,7 @@ class StudySubtitleSync {
     if (external != null && external.isNotEmpty) {
       args = [if (external.startsWith('http')) ...headers, '-i', external, '-map', '0:s:0'];
     } else if (source != null && track.ffIndex != null) {
-      final from = around == null ? null : math.max(0.0, around - _window / 2);
+      final from = window?.from;
       // The seek lands on a keyframe before [from], so keep the file's own
       // timestamps (-copyts) and stop at an absolute end (-to); a -t would
       // count from the keyframe, and on the input side it is ignored.
@@ -138,7 +375,7 @@ class StudySubtitleSync {
         '-map',
         '0:${track.ffIndex}',
         '-copyts',
-        if (from != null) ...['-to', (from + _window).toStringAsFixed(3)],
+        if (window != null) ...['-to', window.to.toStringAsFixed(3)],
       ];
     } else {
       return null;
@@ -195,7 +432,7 @@ class StudySubtitleSync {
   /// The shift `d` (seconds) that makes [target] lines, moved by `d`, overlap
   /// [reference] lines the most. Overlap rather than start times because two
   /// subtitle tracks are timed by different people and split lines
-  /// differently. Null when under 30 % of the reference speech is covered.
+  /// differently. Null when under 30 % of the speech is covered.
   @visibleForTesting
   static ({double offset, int matched, double coverage})? bestOffset(
     List<SubtitleLine> reference,
@@ -244,7 +481,10 @@ class StudySubtitleSync {
     final plateau = fine.where((f) => f.score >= peak * 0.995).map((f) => f.d).toList();
     final offset = (plateau.first + plateau.last) / 2;
 
-    final coverage = peak / refTotal;
+    // Measured against whichever side has less speech here: a window may hold
+    // more English than the part being matched, or the other way round.
+    final tgtTotal = tgt.fold(0.0, (sum, l) => sum + l.end - l.start);
+    final coverage = peak / math.min(refTotal, tgtTotal);
     final matched = reference
         .where((r) => target.any((t) => t.start + offset < r.end && t.end + offset > r.start))
         .length;
@@ -263,6 +503,30 @@ class StudySubtitleSync {
       }
     }
     return out;
+  }
+}
+
+/// Runs at most [limit] jobs at once (ffmpeg windows read in parallel).
+class _Slots {
+  final int limit;
+  var _running = 0;
+  final _waiting = <Completer<void>>[];
+
+  _Slots(this.limit);
+
+  Future<T> run<T>(Future<T> Function() job) async {
+    if (_running >= limit) {
+      final turn = Completer<void>();
+      _waiting.add(turn);
+      await turn.future;
+    }
+    _running++;
+    try {
+      return await job();
+    } finally {
+      _running--;
+      if (_waiting.isNotEmpty) _waiting.removeAt(0).complete();
+    }
   }
 }
 

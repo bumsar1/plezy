@@ -58,4 +58,31 @@ Dialogue: 0,1:02:03.45,1:02:04.00,Main,,0,0,0,,Late
     final japanese = [SubtitleLine(500, 501), SubtitleLine(700, 702)];
     expect(StudySubtitleSync.bestOffset(english, japanese), isNull);
   });
+
+  test('splits at long pauses and folds short parts into a neighbour', () {
+    final lines = [
+      for (var t = 1.0; t < 20; t += 3) SubtitleLine(t, t + 1.5), // cold open: 7 lines
+      SubtitleLine(28, 29), // 8 s pause is not a break
+      SubtitleLine(60, 61), // lone line after the intro: joins the cold open
+      for (var t = 100.0; t < 130; t += 3) SubtitleLine(t, t + 1.5), // part A
+    ];
+    final parts = StudySubtitleSync.splitParts(lines);
+    expect(parts.map((p) => p.length), [9, 10]);
+  });
+
+  test('retimes SRT and ASS per part', () {
+    const srt = '1\n00:00:01,000 --> 00:00:02,500\nA\n\n2\n00:01:40,000 --> 00:01:41,000\nB\n';
+    expect(
+      StudySubtitleSync.retimeSubtitle(srt, isAss: false, boundaries: [50], offsets: [-0.5, 22.25]),
+      '1\n00:00:00,500 --> 00:00:02,000\nA\n\n2\n00:02:02,250 --> 00:02:03,250\nB\n',
+    );
+    const ass =
+        '[Events]\r\nDialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,Hi, you\r\n'
+        'Comment: 0,0:01:40.00,0:01:41.00,Sign,,0,0,0,,{\\pos(1,2)}STORE\r\n';
+    expect(
+      StudySubtitleSync.retimeSubtitle(ass, isAss: true, boundaries: [50], offsets: [-0.5, 22.25]),
+      '[Events]\r\nDialogue: 0,0:00:00.50,0:00:02.00,Default,,0,0,0,,Hi, you\r\n'
+      'Comment: 0,0:02:02.25,0:02:03.25,Sign,,0,0,0,,{\\pos(1,2)}STORE\r\n',
+    );
+  });
 }
