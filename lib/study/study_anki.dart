@@ -110,7 +110,15 @@ class StudyAnki {
       ];
       final fields = _FieldMap(fieldNames);
 
-      final glossary = _glossaryHtml(entry);
+      // JMdict in the main definition; imported dictionaries in Glossary
+      // (Lapis shows both), or after JMdict when there is no such field.
+      final jmdict = _sensesHtml(entry.senses.where((s) => s.dictionary == null));
+      final imported = _importedHtml(entry);
+      final hasGlossaryField =
+          fields.fieldFor(_FieldRole.glossary) != null && fields.fieldFor(_FieldRole.meaning) != null;
+      final glossary = hasGlossaryField || imported.isEmpty
+          ? (jmdict.isEmpty ? imported : jmdict)
+          : [jmdict, imported].where((h) => h.isNotEmpty).join('<br>');
       fields
         ..set(_FieldRole.word, entry.written)
         ..set(_FieldRole.reading, entry.reading.isEmpty ? entry.written : entry.reading)
@@ -118,9 +126,11 @@ class StudyAnki {
         ..set(_FieldRole.meaning, glossary)
         ..set(_FieldRole.sentence, context.sentenceHtml)
         ..set(_FieldRole.source, context.sourceLabel ?? '');
-      // Lapis shows MainDefinition and Glossary both, so the definition goes in
-      // only one of them: Glossary only when there is no main-definition field.
-      if (fields.fieldFor(_FieldRole.meaning) == null) fields.set(_FieldRole.glossary, glossary);
+      if (fields.fieldFor(_FieldRole.meaning) == null) {
+        fields.set(_FieldRole.glossary, glossary);
+      } else if (hasGlossaryField && jmdict.isNotEmpty) {
+        fields.set(_FieldRole.glossary, imported);
+      }
       // Lapis: a word card that also shows the sentence, like the user's Yomitan setup.
       if (fieldNames.contains('IsWordAndSentenceCard')) fields.raw['IsWordAndSentenceCard'] = 'x';
       if (fields.isBasic) {
@@ -191,11 +201,24 @@ class StudyAnki {
     return models.contains('Basic') ? 'Basic' : models.first;
   }
 
-  static String _glossaryHtml(StudyEntry entry) {
-    String sense(StudySense s) => s.glosses.join('; ');
-    final senses = entry.senses.take(8).toList();
-    if (senses.length == 1) return const HtmlEscape().convert(sense(senses.single));
-    return '<ol>${senses.map((s) => '<li>${const HtmlEscape().convert(sense(s))}</li>').join()}</ol>';
+  static String _sensesHtml(Iterable<StudySense> senses) {
+    String sense(StudySense s) => const HtmlEscape().convert(s.glosses.join('; '));
+    final list = senses.take(8).toList();
+    if (list.isEmpty) return '';
+    if (list.length == 1) return sense(list.single);
+    return '<ol>${list.map((s) => '<li>${sense(s)}</li>').join()}</ol>';
+  }
+
+  /// Imported dictionaries' senses, each under its dictionary's title.
+  static String _importedHtml(StudyEntry entry) {
+    final byDictionary = <String, List<StudySense>>{};
+    for (final s in entry.senses) {
+      if (s.dictionary != null) (byDictionary[s.dictionary!] ??= []).add(s);
+    }
+    return [
+      for (final MapEntry(key: title, value: senses) in byDictionary.entries)
+        '<div><i>${const HtmlEscape().convert(title)}</i></div>${_sensesHtml(senses)}',
+    ].join();
   }
 
   /// Anki's furigana syntax, `食[た]べる`: the kana the word and its reading

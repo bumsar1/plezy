@@ -22,4 +22,13 @@ class StudyStrings {
   static const noteTypeAuto = 'Automatic (Lapis if installed, else Basic)';
   static String ffmpegStatus(String? path) => path ?? 'Not found — install ffmpeg for sentence audio and GIFs';
   static const ffmpegTitle = 'ffmpeg';
+
+  static const importTitle = 'Import Yomitan dictionary';
+  static const importSubtitle = 'A term dictionary .zip — shown below JMdict in the popup';
+  static String imported(String title) => 'Imported $title';
+  static String importFailed(String error) => 'Import failed: $error';
+  static String dictionaryEntries(int count) => '$count entries — tap to remove';
+  static const removeTitle = 'Remove dictionary?';
+  static String removeMessage(String title) => '"$title" will no longer appear in study mode.';
+  static const remove = 'Remove';
 }

@@ -11,13 +11,19 @@ import 'package:path_provider/path_provider.dart';
 
 import '../utils/app_logger.dart';
 import 'deconjugator.dart';
+import 'study_database.dart';
+import 'study_user_dictionaries.dart';
 
 /// One dictionary sense: English glosses plus JMdict part-of-speech codes.
 class StudySense {
   final List<String> glosses;
   final List<String> pos;
 
-  const StudySense(this.glosses, this.pos);
+  /// Title of the imported dictionary this sense comes from; null for the
+  /// built-in JMdict.
+  final String? dictionary;
+
+  const StudySense(this.glosses, this.pos, {this.dictionary});
 }
 
 class StudyEntry {
@@ -68,7 +74,7 @@ class StudyLookup {
 /// on first use, and the same longest-prefix + deconjugation lookup meikipop
 /// does.
 class StudyDictionary {
-  StudyDictionary._(this._db, this._deconjugator);
+  StudyDictionary._(this._db, this._deconjugator, this._user);
 
   static const downloadUrl =
       'https://github.com/bumsar1/plezy/releases/download/study-dictionary/study_dictionary.sqlite.gz';
@@ -77,10 +83,14 @@ class StudyDictionary {
   static const _maxEntries = 6;
   static const _defaultFreq = 999999;
 
+  /// Entry ids are per file; this spaces them apart (main dictionary = 0).
+  static const _sourceStride = 10000000000;
+
   static Future<StudyDictionary>? _opening;
 
-  final _DictionaryDatabase _db;
+  final StudyDatabase _db;
   final Deconjugator _deconjugator;
+  List<({String title, StudyDatabase db})> _user;
   final Map<String, StudyLookup> _cache = {};
 
   /// Opens the dictionary, downloading it first if needed. [onProgress]
@@ -100,16 +110,35 @@ class StudyDictionary {
   static Future<StudyDictionary> _open(void Function(double)? onProgress) async {
     final file = await _file();
     if (!await file.exists()) await _download(file, onProgress);
-    return openFile(file);
+    return openFile(file, userDictionaries: await StudyUserDictionaries.list());
   }
 
   /// Opens an already downloaded dictionary file.
   @visibleForTesting
-  static Future<StudyDictionary> openFile(File file) async {
-    final db = _DictionaryDatabase(NativeDatabase.createInBackground(file));
+  static Future<StudyDictionary> openFile(File file, {List<StudyUserDictionary> userDictionaries = const []}) async {
+    final db = StudyDatabase(NativeDatabase.createInBackground(file));
     final row = await db.customSelect("SELECT value FROM meta WHERE key = 'deconjugator_rules'").getSingle();
     final rules = jsonDecode(row.read<String>('value')) as List<dynamic>;
-    return StudyDictionary._(db, Deconjugator(rules));
+    return StudyDictionary._(db, Deconjugator(rules), _openUser(userDictionaries));
+  }
+
+  static List<({String title, StudyDatabase db})> _openUser(List<StudyUserDictionary> dictionaries) => [
+    for (final d in dictionaries) (title: d.title, db: StudyDatabase(NativeDatabase.createInBackground(d.file))),
+  ];
+
+  /// Picks up imported or removed dictionaries in the open instance.
+  /// [only] limits it to those (to let go of one about to be deleted).
+  static Future<void> userDictionariesChanged({List<StudyUserDictionary>? only}) async {
+    final opening = _opening;
+    if (opening == null) return;
+    final dictionary = await opening;
+    final old = dictionary._user;
+    dictionary
+      .._user = _openUser(only ?? await StudyUserDictionaries.list())
+      .._cache.clear();
+    for (final o in old) {
+      await o.db.close();
+    }
   }
 
   static Future<void> _download(File target, void Function(double)? onProgress) async {
@@ -181,7 +210,7 @@ class StudyDictionary {
     final rows = await _termsFor(keys);
 
     final senseCache = <int, List<StudySense>>{};
-    final collected = <int, ({_TermRow row, DeconjugatedForm form, int prefixLength})>{};
+    final collected = <int, ({_TermRow row, DeconjugatedForm form, int prefixLength, bool loose})>{};
     var foundPrimary = false;
     var currentLength = -1;
     var lengthHadHit = false;
@@ -195,9 +224,18 @@ class StudyDictionary {
       final prefix = text.substring(0, c.prefixLength);
       for (final row in _rowsFor(rows, c.form.text)) {
         if (row.written == null && _kanji.hasMatch(c.form.text)) continue;
+        var loose = false;
         if (c.form.tags.isNotEmpty) {
           final senses = senseCache[row.entryId] ??= await _senses(row.entryId);
-          if (!senses.any((s) => s.pos.contains(c.form.tags.last))) continue;
+          final tag = c.form.tags.last;
+          if (!senses.any((s) => s.pos.contains(tag))) {
+            // Imported Yomitan dictionaries use coarse rule names (`v5`, `vs`,
+            // `adj-i`) where JMdict says `v5k-s`: a prefix match is loose and
+            // only counts next to a JMdict hit for the same word, which keeps
+            // classical verbs like 賜ぶ out of 食べなかった.
+            if (row.entryId < _sourceStride || !senses.any((s) => s.pos.any(tag.startsWith))) continue;
+            loose = true;
+          }
         }
         // Once a longer match with kanji exists, kana-only prefixes shouldn't
         // drag in unrelated kanji words.
@@ -205,14 +243,15 @@ class StudyDictionary {
           continue;
         }
         lengthHadHit = true;
-        collected.putIfAbsent(row.entryId, () => (row: row, form: c.form, prefixLength: c.prefixLength));
+        collected.putIfAbsent(row.entryId, () => (row: row, form: c.form, prefixLength: c.prefixLength, loose: loose));
       }
     }
 
     final merged = <String, _Merged>{};
     for (final hit in collected.values) {
       final written = hit.row.written ?? hit.row.key;
-      final reading = hit.row.reading ?? '';
+      // Some imported dictionaries repeat a kana word as its own reading.
+      final reading = hit.row.reading == written ? '' : hit.row.reading ?? '';
       final senses = senseCache[hit.row.entryId] ??= await _senses(hit.row.entryId);
       final priority = _priority(written, hit.row.freq, hit.form, hit.prefixLength, text);
       final m = merged['$written\u0000$reading'];
@@ -226,8 +265,9 @@ class StudyDictionary {
           priority,
           hit.prefixLength,
           hit.row.entryId,
-        );
+        )..anchored = !hit.loose;
       } else {
+        if (!hit.loose) m.anchored = true;
         if (m.entryId != hit.row.entryId) m.senses.addAll(senses);
         if (priority > m.priority) {
           m
@@ -239,6 +279,16 @@ class StudyDictionary {
           ..matchLength = math.max(m.matchLength, hit.prefixLength);
       }
     }
+
+    // JMdict first, then the imported dictionaries in load order; repeated
+    // senses (one entry reached by several rows) only once.
+    final order = [null, for (final u in _user) u.title];
+    for (final m in merged.values) {
+      final seen = <String>{};
+      m.senses.retainWhere((s) => seen.add('${s.dictionary}\u0000${s.glosses.join('\u0001')}'));
+      mergeSort(m.senses, compare: (a, b) => order.indexOf(a.dictionary).compareTo(order.indexOf(b.dictionary)));
+    }
+    merged.removeWhere((_, m) => m.senses.isEmpty || !m.anchored);
 
     final sorted = merged.values.toList()
       ..sort(
@@ -271,32 +321,39 @@ class StudyDictionary {
   Future<Map<String, List<_TermRow>>> _termsFor(Set<String> keys) async {
     final out = <String, List<_TermRow>>{};
     final list = keys.toList();
+    final sources = [_db, for (final u in _user) u.db];
     // SQLite's default variable limit is far above this, but keep batches modest.
-    for (var i = 0; i < list.length; i += 400) {
-      final batch = list.sublist(i, math.min(i + 400, list.length));
-      final rows = await _db
-          .customSelect(
-            'SELECT key, written, reading, freq, entry_id FROM terms WHERE key IN (${List.filled(batch.length, '?').join(',')})',
-            variables: [for (final k in batch) Variable.withString(k)],
-          )
-          .get();
-      for (final r in rows) {
-        final row = _TermRow(
-          r.read<String>('key'),
-          r.readNullable<String>('written'),
-          r.readNullable<String>('reading'),
-          r.read<int>('freq'),
-          r.read<int>('entry_id'),
-        );
-        (out[row.key] ??= []).add(row);
+    for (final (source, db) in sources.indexed) {
+      for (var i = 0; i < list.length; i += 400) {
+        final batch = list.sublist(i, math.min(i + 400, list.length));
+        final rows = await db
+            .customSelect(
+              'SELECT key, written, reading, freq, entry_id FROM terms WHERE key IN (${List.filled(batch.length, '?').join(',')})',
+              variables: [for (final k in batch) Variable.withString(k)],
+            )
+            .get();
+        for (final r in rows) {
+          final row = _TermRow(
+            r.read<String>('key'),
+            r.readNullable<String>('written'),
+            r.readNullable<String>('reading'),
+            r.read<int>('freq'),
+            r.read<int>('entry_id') + source * _sourceStride,
+          );
+          (out[row.key] ??= []).add(row);
+        }
       }
     }
     return out;
   }
 
   Future<List<StudySense>> _senses(int entryId) async {
-    final row = await _db
-        .customSelect('SELECT senses FROM entries WHERE id = ?', variables: [Variable.withInt(entryId)])
+    final source = entryId ~/ _sourceStride;
+    if (source > _user.length) return const [];
+    final db = source == 0 ? _db : _user[source - 1].db;
+    final title = source == 0 ? null : _user[source - 1].title;
+    final row = await db
+        .customSelect('SELECT senses FROM entries WHERE id = ?', variables: [Variable.withInt(entryId % _sourceStride)])
         .getSingleOrNull();
     if (row == null) return const [];
     return [
@@ -304,6 +361,7 @@ class StudyDictionary {
         StudySense(
           [for (final g in (s['glosses'] as List<dynamic>? ?? const [])) g.toString()],
           [for (final p in (s['pos'] as List<dynamic>? ?? const [])) p.toString()],
+          dictionary: title,
         ),
     ];
   }
@@ -358,6 +416,9 @@ class _Merged {
   final String written;
   final String reading;
   final List<StudySense> senses;
+
+  /// Reached by at least one exact (non-loose) hit.
+  bool anchored = true;
   int freq;
   List<String> process;
   double priority;
@@ -374,22 +435,4 @@ class _Merged {
     this.matchLength,
     this.entryId,
   );
-}
-
-/// Schema-less drift database: the dictionary file is built offline, so this
-/// only runs raw queries against it.
-class _DictionaryDatabase extends GeneratedDatabase {
-  _DictionaryDatabase(super.executor);
-
-  @override
-  int get schemaVersion => 1;
-
-  @override
-  Iterable<TableInfo<Table, dynamic>> get allTables => const [];
-
-  @override
-  List<DatabaseSchemaEntity> get allSchemaEntities => const [];
-
-  @override
-  MigrationStrategy get migration => MigrationStrategy(onCreate: (_) async {}, onUpgrade: (_, _, _) async {});
 }

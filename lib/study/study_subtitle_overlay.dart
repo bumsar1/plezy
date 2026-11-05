@@ -42,7 +42,7 @@ class StudySubtitleOverlay extends StatefulWidget {
 
 class _StudySubtitleOverlayState extends State<StudySubtitleOverlay> {
   static const _pollInterval = Duration(milliseconds: 100);
-  static const _popupWidth = 380.0;
+  static const _popupWidth = 440.0;
 
   /// Clearance above the desktop controls' seek bar and button row.
   static const _controlsClearance = 130.0;
@@ -479,7 +479,6 @@ class _StudyPopup extends StatelessWidget {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),
         child: SingleChildScrollView(
-          physics: const NeverScrollableScrollPhysics(),
           padding: const EdgeInsets.all(12),
           child: DefaultTextStyle(
             style: const TextStyle(color: Colors.white, fontSize: 14, height: 1.35, decoration: TextDecoration.none),
@@ -550,7 +549,7 @@ class _StudyPopup extends StatelessWidget {
           ),
         if (process.isNotEmpty) Text(process.join(' › '), style: const TextStyle(color: _muted, fontSize: 12)),
         const SizedBox(height: 4),
-        for (final (i, sense) in entry.senses.take(5).indexed)
+        for (final (i, sense) in entry.senses.where((s) => s.dictionary == null).take(5).indexed)
           Padding(
             padding: const EdgeInsets.only(top: 2),
             child: Text.rich(
@@ -570,8 +569,30 @@ class _StudyPopup extends StatelessWidget {
               ),
             ),
           ),
+        for (final MapEntry(key: title, value: senses) in _imported(entry).entries) ...[
+          Padding(
+            padding: const EdgeInsets.only(top: 8, bottom: 2),
+            child: Text(
+              title,
+              style: const TextStyle(color: _muted, fontSize: 11, fontStyle: FontStyle.italic),
+            ),
+          ),
+          for (final sense in senses.take(3))
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(sense.glosses.join(' '), maxLines: 8, overflow: TextOverflow.ellipsis),
+            ),
+        ],
       ],
     );
+  }
+
+  static Map<String, List<StudySense>> _imported(StudyEntry entry) {
+    final out = <String, List<StudySense>>{};
+    for (final s in entry.senses) {
+      if (s.dictionary != null) (out[s.dictionary!] ??= []).add(s);
+    }
+    return out;
   }
 
   Widget _headword(StudyEntry entry) {
