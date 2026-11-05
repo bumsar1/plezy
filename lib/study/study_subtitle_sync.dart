@@ -1,11 +1,15 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../media/media_item.dart';
 import '../mpv/mpv.dart';
 import '../services/player_sync_offsets.dart';
 import '../services/scoped_player_prefs.dart';
+import '../utils/app_logger.dart';
 import 'study_ffmpeg.dart';
 
 class StudySyncResult {
@@ -28,7 +32,6 @@ class StudySubtitleSync {
 
   static const _window = 90.0;
   static const _maxShift = 60.0;
-  static const _tolerance = 0.3;
   static const _textCodecs = {'subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text'};
 
   static Future<StudySyncResult> syncToEnglish(Player player, MediaItem? item) async {
@@ -48,14 +51,18 @@ class StudySubtitleSync {
     final headers = StudyFfmpeg.headerArgs(await player.getProperty('http-header-fields'));
     final position = double.tryParse(await player.getProperty('time-pos') ?? '') ?? 0;
 
-    final reference = await _starts(ffmpeg, english, source, headers, position);
-    final target = await _starts(ffmpeg, primary, source, headers, null);
+    final reference = await _lines(ffmpeg, english, source, headers, position, 'reference');
+    final target = await _lines(ffmpeg, primary, source, headers, null, 'target');
     if (reference == null || reference.length < 3) {
       return const StudySyncResult(null, 'Could not read the English lines');
     }
     if (target == null || target.length < 3) return const StudySyncResult(null, 'Could not read the subtitle lines');
 
     final best = bestOffset(reference, target);
+    appLogger.i(
+      'Study sync: ${reference.length} English lines near ${position.toStringAsFixed(1)} s, '
+      '${target.length} subtitle lines; best ${best?.offset} s covering ${best?.coverage}',
+    );
     if (best == null) return const StudySyncResult(null, 'No matching timing found');
 
     final ms = (best.offset * 1000).round().clamp(
@@ -102,14 +109,17 @@ class StudySubtitleSync {
     return english.where((t) => !isPartial(t)).firstOrNull ?? english.firstOrNull;
   }
 
-  /// Line start times in seconds. With [around] set, an embedded track is
-  /// read only in a window centred there.
-  static Future<List<double>?> _starts(
+  /// Spoken lines of [track] (signs, songs and karaoke left out). With
+  /// [around] set, an embedded track is read only in a window centred there.
+  /// The raw extract is kept in the temp folder as sync_[label].ass for
+  /// diagnosing a sync that went wrong.
+  static Future<List<SubtitleLine>?> _lines(
     String ffmpeg,
     _Track track,
     String? source,
     List<String> headers,
     double? around,
+    String label,
   ) async {
     final List<String> args;
     final external = track.externalFile;
@@ -133,76 +143,134 @@ class StudySubtitleSync {
     } else {
       return null;
     }
-    final srt = await StudyFfmpeg.output(ffmpeg, [...args, '-f', 'srt', 'pipe:1']);
-    return srt == null ? null : parseSrtStarts(srt);
+    // ASS keeps the style names and override tags that tell signs from speech.
+    final ass = await StudyFfmpeg.output(ffmpeg, [...args, '-c:s', 'ass', '-f', 'ass', 'pipe:1']);
+    if (ass == null) return null;
+    try {
+      final dir = Directory('${(await getTemporaryDirectory()).path}${Platform.pathSeparator}plezy_study');
+      await dir.create(recursive: true);
+      await File('${dir.path}${Platform.pathSeparator}sync_$label.ass').writeAsString(ass);
+    } catch (_) {
+      // Diagnostics only.
+    }
+    return parseAssLines(ass);
   }
 
-  static final _timing = RegExp(r'(\d+):(\d\d):(\d\d)[,.](\d{3})\s*-->');
+  static final _assTime = RegExp(r'^(\d+):(\d\d):(\d\d)[.,](\d+)$');
+  static final _signTags = RegExp(r'\\(pos|move|org|clip|iclip)\(|\\p[1-9]|\\k[fo]?\d', caseSensitive: false);
+  static final _signStyles = RegExp(
+    r'sign|song|kara|title|note|insert|typeset|lyric|romaji|^op|^ed|^ts|[ _-](op|ed)$',
+    caseSensitive: false,
+  );
 
-  /// Distinct line start times of an SRT document, sorted.
+  /// Spoken lines of an ASS document: Dialogue events whose style and
+  /// override tags don't mark them as signs, songs or karaoke.
   @visibleForTesting
-  static List<double> parseSrtStarts(String srt) {
-    final starts = <int>{};
-    for (final m in _timing.allMatches(srt)) {
-      final ms = int.parse(m[1]!) * 3600000 + int.parse(m[2]!) * 60000 + int.parse(m[3]!) * 1000 + int.parse(m[4]!);
-      starts.add((ms / 10).round()); // 10 ms buckets fold stacked ASS layers
+  static List<SubtitleLine> parseAssLines(String ass) {
+    final lines = <SubtitleLine>[];
+    for (final raw in LineSplitter.split(ass)) {
+      if (!raw.startsWith('Dialogue:')) continue;
+      final fields = raw.substring(9).split(',');
+      if (fields.length < 10) continue;
+      final start = _parseAssTime(fields[1].trim());
+      final end = _parseAssTime(fields[2].trim());
+      final style = fields[3].trim();
+      final effect = fields[8].trim();
+      final text = fields.sublist(9).join(',');
+      if (start == null || end == null || end <= start) continue;
+      if (effect.isNotEmpty || _signStyles.hasMatch(style) || _signTags.hasMatch(text)) continue;
+      if (text.replaceAll(RegExp(r'\{[^}]*\}'), '').replaceAll(r'\N', '').trim().isEmpty) continue;
+      lines.add(SubtitleLine(start, end));
     }
-    return (starts.toList()..sort()).map((s) => s / 100).toList();
+    return lines..sort((a, b) => a.start.compareTo(b.start));
   }
 
-  /// The shift `d` (seconds) for which the most [reference] starts have a
-  /// [target] start at `reference − d`, refined to the median of those pairs.
-  /// Null when fewer than 3 lines (or under a third of [reference]) agree.
+  static double? _parseAssTime(String s) {
+    final m = _assTime.firstMatch(s);
+    if (m == null) return null;
+    final frac = double.parse('0.${m[4]}');
+    return int.parse(m[1]!) * 3600 + int.parse(m[2]!) * 60 + int.parse(m[3]!) + frac;
+  }
+
+  /// The shift `d` (seconds) that makes [target] lines, moved by `d`, overlap
+  /// [reference] lines the most. Overlap rather than start times because two
+  /// subtitle tracks are timed by different people and split lines
+  /// differently. Null when under 30 % of the reference speech is covered.
   @visibleForTesting
-  static ({double offset, int matched})? bestOffset(List<double> reference, List<double> target) {
-    final sortedTarget = [...target]..sort();
+  static ({double offset, int matched, double coverage})? bestOffset(
+    List<SubtitleLine> reference,
+    List<SubtitleLine> target,
+  ) {
+    final ref = _union(reference);
+    final refTotal = ref.fold(0.0, (sum, l) => sum + l.end - l.start);
+    if (refTotal <= 0) return null;
+    final from = ref.first.start - _maxShift;
+    final to = ref.last.end + _maxShift;
+    final tgt = _union([
+      for (final l in target)
+        if (l.end > from && l.start < to) l,
+    ]);
+    if (tgt.isEmpty) return null;
 
-    // Vote with every pair's difference in 0.1 s bins, then score the
-    // strongest bins exactly.
-    final votes = <int, int>{};
-    for (final r in reference) {
-      for (final t in sortedTarget) {
-        final d = r - t;
-        if (d.abs() <= _maxShift) votes.update((d * 10).round(), (v) => v + 1, ifAbsent: () => 1);
+    double overlapAt(double d) {
+      var total = 0.0;
+      var j = 0;
+      for (final r in ref) {
+        while (j < tgt.length && tgt[j].end + d <= r.start) {
+          j++;
+        }
+        for (var k = j; k < tgt.length && tgt[k].start + d < r.end; k++) {
+          total += math.min(r.end, tgt[k].end + d) - math.max(r.start, tgt[k].start + d);
+        }
+      }
+      return total;
+    }
+
+    // Coarse sweep, then a fine one around the peak; the middle of the fine
+    // plateau is the answer (overlap is flat while edges don't line up).
+    var best = 0.0;
+    var bestScore = -1.0;
+    for (var d = -_maxShift; d <= _maxShift; d += 0.1) {
+      final score = overlapAt(d);
+      if (score > bestScore) {
+        bestScore = score;
+        best = d;
       }
     }
-    final candidates = (votes.entries.toList()..sort((a, b) => b.value.compareTo(a.value))).take(25);
+    final fine = <({double d, double score})>[
+      for (var d = best - 0.3; d <= best + 0.3; d += 0.01) (d: d, score: overlapAt(d)),
+    ];
+    final peak = fine.map((f) => f.score).reduce(math.max);
+    final plateau = fine.where((f) => f.score >= peak * 0.995).map((f) => f.d).toList();
+    final offset = (plateau.first + plateau.last) / 2;
 
-    ({double offset, int matched, List<double> diffs})? best;
-    for (final c in candidates) {
-      final d = c.key / 10;
-      final diffs = <double>[];
-      for (final r in reference) {
-        final t = _nearest(sortedTarget, r - d);
-        if (t != null && (t + d - r).abs() <= _tolerance) diffs.add(r - t);
-      }
-      if (best == null ||
-          diffs.length > best.matched ||
-          (diffs.length == best.matched && d.abs() < best.offset.abs())) {
-        best = (offset: d, matched: diffs.length, diffs: diffs);
-      }
-    }
-    if (best == null || best.matched < math.max(3, reference.length / 3)) return null;
-    final diffs = best.diffs..sort();
-    return (offset: diffs[diffs.length ~/ 2], matched: best.matched);
+    final coverage = peak / refTotal;
+    final matched = reference
+        .where((r) => target.any((t) => t.start + offset < r.end && t.end + offset > r.start))
+        .length;
+    if (coverage < 0.3 || matched < 3) return null;
+    return (offset: offset, matched: matched, coverage: coverage);
   }
 
-  static double? _nearest(List<double> sorted, double x) {
-    if (sorted.isEmpty) return null;
-    var lo = 0;
-    var hi = sorted.length - 1;
-    while (lo < hi) {
-      final mid = (lo + hi) ~/ 2;
-      if (sorted[mid] < x) {
-        lo = mid + 1;
+  static List<SubtitleLine> _union(List<SubtitleLine> lines) {
+    final sorted = [...lines]..sort((a, b) => a.start.compareTo(b.start));
+    final out = <SubtitleLine>[];
+    for (final l in sorted) {
+      if (out.isNotEmpty && l.start <= out.last.end) {
+        if (l.end > out.last.end) out[out.length - 1] = SubtitleLine(out.last.start, l.end);
       } else {
-        hi = mid;
+        out.add(l);
       }
     }
-    final above = sorted[lo];
-    final below = lo > 0 ? sorted[lo - 1] : above;
-    return (x - below).abs() <= (above - x).abs() ? below : above;
+    return out;
   }
+}
+
+class SubtitleLine {
+  final double start;
+  final double end;
+
+  const SubtitleLine(this.start, this.end);
 }
 
 class _Track {
